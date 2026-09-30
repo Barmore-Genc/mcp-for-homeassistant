@@ -61,9 +61,8 @@ network.
 ## Connecting an agent to it
 
 Add `https://your-origin/mcp` as an MCP connector. The agent will send you to a
-sign-in page; enter the username and password from the container's environment —
-or, if an identity provider is configured, continue with the provider, and it
-is connected.
+sign-in page. Enter the username and password from the container's environment,
+or continue with your identity provider if one is configured.
 
 There is no account to create and no other user interface. The sign-in page and
 the OAuth endpoints behind it exist because the OAuth flow is the only way the
