@@ -82,8 +82,11 @@ func (s *Subscription) finish(err error) {
 // call more than once.
 func (s *Subscription) Close() error {
 	s.closeOnce.Do(func() {
-		if s.stop != nil {
-			s.stop()
+		s.mu.Lock()
+		stop := s.stop
+		s.mu.Unlock()
+		if stop != nil {
+			stop()
 		}
 		s.w.removeSub(s.id)
 		s.finish(nil)
@@ -142,7 +145,9 @@ func (c *Client) subscribe(ctx context.Context, typ string, payload any, buf int
 		}
 		return nil, err
 	}
+	s.mu.Lock()
 	s.stop = context.AfterFunc(ctx, func() { _ = s.Close() })
+	s.mu.Unlock()
 	return s, nil
 }
 

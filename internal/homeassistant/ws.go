@@ -299,20 +299,23 @@ func (w *wsConn) call(ctx context.Context, typ string, payload any) (json.RawMes
 
 func (w *wsConn) callWithSub(ctx context.Context, typ string, payload any, sub *Subscription) (json.RawMessage, error) {
 	ch := make(chan wsMessage, 1)
+	// HA rejects an id lower than one it has already seen, so allocating the id
+	// and writing the frame must happen under the same lock.
+	w.writeMu.Lock()
 	id, err := w.register(ch, sub)
 	if err != nil {
+		w.writeMu.Unlock()
 		return nil, err
 	}
 	msg, err := encodeCommand(id, typ, payload)
 	if err != nil {
+		w.writeMu.Unlock()
 		w.forget(id)
 		if sub != nil {
 			w.removeSub(id)
 		}
 		return nil, err
 	}
-
-	w.writeMu.Lock()
 	err = w.conn.Write(ctx, websocket.MessageText, msg)
 	w.writeMu.Unlock()
 	if err != nil {
