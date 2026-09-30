@@ -169,9 +169,90 @@ not exist, so `MCP_SIGNING_KEY` is the revocation switch; the signed state that
 carries an in-progress sign-in through the provider expires after ten minutes
 and can be used only once.
 
+## Tools
+
+Tools marked *write* change Home Assistant. They are not offered when
+`MCP_READ_ONLY` is `true`.
+
+Entities and states:
+
+- `ha_list_entities`: find entities and their current state, filtered by domain, area, label, device or search text.
+- `ha_get_state`: all attributes and registry details of one or more entities.
+- `ha_history`: how entity states changed over a time range, with min, max and average for sensors.
+- `ha_logbook`: what happened and which automation, script or user caused it.
+- `ha_statistics`: long-term statistics per hour, day, week or month, such as daily energy use.
+- `ha_render_template`: render a Jinja template the way an automation would.
+- `ha_camera_snapshot`: a current image from a camera.
+
+Services and events:
+
+- `ha_list_services`: the services Home Assistant offers, with their fields and descriptions.
+- `ha_call_service` (*write*): call a service, such as `light.turn_on`.
+- `ha_listen_events`: listen on the event bus for a few seconds and return what fired.
+- `ha_fire_event` (*write*): fire a custom event.
+
+Automations, scripts and scenes:
+
+- `ha_get_automation`: list automations, scripts or scenes, or read one's config as YAML.
+- `ha_manage_automation` (*write*): save, delete, enable, disable, trigger, run or activate one.
+- `ha_validate_config`: check triggers, conditions and actions without saving.
+- `ha_traces`: step-by-step records of recent automation and script runs.
+- `ha_list_device_automations`: the device triggers, conditions and actions a device offers.
+- `ha_find_related`: everything connected to an entity, device, area, automation or blueprint.
+- `ha_list_blueprints`: installed blueprints and their inputs.
+- `ha_manage_blueprint` (*write*): import, write or delete a blueprint.
+
+Areas, devices, helpers and integrations:
+
+- `ha_list_registry`: areas, floors, labels, categories, devices, entities, persons and zones.
+- `ha_manage_registry` (*write*): create, update or delete areas, floors, labels, categories and zones, and update devices and entities.
+- `ha_list_helpers`: the helpers created in the UI with their settings.
+- `ha_manage_helper` (*write*): create, update or delete a helper.
+- `ha_list_integrations`: configured integrations and their state.
+- `ha_manage_integration` (*write*): reload, enable or disable an integration.
+
+Dashboards:
+
+- `ha_get_dashboard`: list dashboards, or read one's config as YAML.
+- `ha_save_dashboard` (*write*): replace a dashboard's config.
+
+Calendars, to-do lists and notifications:
+
+- `ha_calendar_events`: list calendars, or the events of one.
+- `ha_list_todo_items`: list to-do lists, or the items of one.
+- `ha_list_notifications`: the notifications shown in the sidebar.
+
+System and backups:
+
+- `ha_system_log`: logged warnings and errors, or the end of `home-assistant.log`.
+- `ha_check_config`: run the configuration check on the YAML files.
+- `ha_restart` (*write*): restart Home Assistant after a passing configuration check.
+- `ha_backup_info`: the backups, when the next automatic backup runs and the automatic backup settings.
+- `ha_create_backup` (*write*): start a backup with the automatic backup settings.
+
 ## Development
 
+Build and run the unit tests:
+
 ```sh
-go test ./...
 go build ./...
+go vet ./...
+go test -race ./...
 ```
+
+The integration tests run against a real Home Assistant. `dev/ha-test/setup.sh`
+starts one in Docker as the container `ha-mcp-test` on port 18124 (set
+`HA_TEST_PORT` for another port), onboards it with the demo integration, keeps
+its configuration in `dev/ha-test/config` and writes its URL and an admin token
+to `dev/ha-test/env`. Running it again reuses the container and the token.
+
+```sh
+dev/ha-test/setup.sh
+env $(cat dev/ha-test/env) go test -tags integration ./...
+```
+
+The integration tests create and remove their own automations, scripts,
+scenes, helpers, dashboards and backups, overwrite the default dashboard and the
+backup settings, and `TestIntegrationZRestart` restarts Home Assistant. Run them
+against the test instance only. Add `-skip TestIntegrationZRestart` to keep it
+running.

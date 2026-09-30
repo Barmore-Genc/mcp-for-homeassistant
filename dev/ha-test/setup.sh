@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Starts (or reuses) a Home Assistant test instance in Docker, onboards it and
-# writes HA_URL / HA_TOKEN to ha-test/env.
+# writes HA_URL / HA_TOKEN to dev/ha-test/env. Its configuration lives in
+# dev/ha-test/config.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd -P)"
 
 CONFIG_DIR="$HERE/config"
 ENV_FILE="$HERE/env"
@@ -61,6 +62,10 @@ fi
 [ -f "$CONFIG_DIR/scenes.yaml" ] || echo "[]" >"$CONFIG_DIR/scenes.yaml"
 
 if docker container inspect "$NAME" >/dev/null 2>&1; then
+  mounted="$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' "$NAME")"
+  if [ "$mounted" != "$CONFIG_DIR" ]; then
+    echo "Reusing the existing container $NAME. Its configuration is in $mounted, not $CONFIG_DIR." >&2
+  fi
   if [ "$(docker container inspect -f '{{.State.Running}}' "$NAME")" != "true" ]; then
     docker start "$NAME" >/dev/null
   fi
