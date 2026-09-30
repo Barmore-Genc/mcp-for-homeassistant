@@ -2,11 +2,14 @@ package homeassistant
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -100,18 +103,58 @@ func validateBlueprintURL(raw string) error {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return invalidArg("blueprint URL must be an https URL")
 	}
-	host := u.Hostname()
-	if net.ParseIP(host) != nil {
-		return invalidArg("blueprint URL must use a host name, not an IP address")
-	}
-	lh := strings.ToLower(host)
-	if !strings.Contains(lh, ".") || lh == "localhost" || strings.HasSuffix(lh, ".localhost") ||
-		strings.HasSuffix(lh, ".local") || strings.HasSuffix(lh, ".internal") || strings.HasSuffix(lh, ".lan") ||
-		strings.HasSuffix(lh, ".home.arpa") {
-		return invalidArg("blueprint URL must point to a public host")
-	}
 	if p := u.Port(); p != "" && p != "443" {
 		return invalidArg("blueprint URL must use the default https port")
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if net.ParseIP(host) != nil || numericHost(host) {
+		return invalidArg("blueprint URL must use a host name, not an IP address")
+	}
+	if !strings.Contains(host, ".") || host == "localhost" {
+		return invalidArg("blueprint URL must point to a public host")
+	}
+	for _, suffix := range []string{".localhost", ".local", ".internal", ".lan", ".home.arpa", ".home", ".corp", ".intranet", ".private"} {
+		if strings.HasSuffix(host, suffix) {
+			return invalidArg("blueprint URL must point to a public host")
+		}
+	}
+	return nil
+}
+
+// numericHost reports whether the last label is a number. No TLD is numeric,
+// and resolvers read such names as IPv4 shorthand ("127.1", "0x7f.1").
+func numericHost(host string) bool {
+	last := host[strings.LastIndexByte(host, '.')+1:]
+	digits, base := last, "0123456789"
+	if h, ok := strings.CutPrefix(last, "0x"); ok {
+		digits, base = h, "0123456789abcdef"
+	}
+	return last != "" && strings.Trim(digits, base) == ""
+}
+
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// checkBlueprintHost resolves the import URL's host and refuses addresses on
+// HA's own network. HA resolves the name again when it fetches and follows
+// redirects on its own, so this narrows what a caller can reach rather than
+// closing it off.
+func (c *Client) checkBlueprintHost(ctx context.Context, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return invalidArg("blueprint URL must be an https URL")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	addrs, err := c.lookupHost(ctx, u.Hostname())
+	if err != nil {
+		return invalidArg("blueprint URL host %s does not resolve: %v", u.Hostname(), err)
+	}
+	for _, a := range addrs {
+		a = a.Unmap()
+		if a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
+			a.IsMulticast() || a.IsUnspecified() || a.IsInterfaceLocalMulticast() || cgnat.Contains(a) {
+			return invalidArg("blueprint URL host %s resolves to %s, which is not a public address", u.Hostname(), a)
+		}
 	}
 	return nil
 }

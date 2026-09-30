@@ -3,6 +3,8 @@ package homeassistant
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -130,11 +132,31 @@ func (c *Client) ImportBlueprint(ctx context.Context, sourceURL string) (*Import
 	if err := validateBlueprintURL(sourceURL); err != nil {
 		return nil, err
 	}
-	var out ImportedBlueprint
-	if err := c.wsCall(ctx, "blueprint/import", map[string]any{"url": sourceURL}, &out); err != nil {
+	if err := c.checkBlueprintHost(ctx, sourceURL); err != nil {
 		return nil, err
 	}
+	var out ImportedBlueprint
+	if err := c.wsCall(ctx, "blueprint/import", map[string]any{"url": sourceURL}, &out); err != nil {
+		return nil, redactImportError(err)
+	}
+	// HA has already parsed the download with its own loader, so the metadata
+	// and validation errors may hold what a tag read from the HA host. Only the
+	// raw text is safe to look at until it passes the check.
+	if err := checkBlueprintYAML(out.RawData); err != nil {
+		return nil, fmt.Errorf("the blueprint at %s was not imported: %w", sourceURL, err)
+	}
 	return &out, nil
+}
+
+// redactImportError drops the message of errors HA raised while parsing and
+// validating the download, since they quote the parsed data, which may include
+// what a YAML tag in it read from the HA host.
+func redactImportError(err error) error {
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "home_assistant_error" {
+		return err
+	}
+	return &Error{Op: e.Op, Code: e.Code, Message: "the downloaded file is not a valid blueprint; Home Assistant's error is not shown because it can quote the file's contents"}
 }
 
 // SaveBlueprintRequest saves blueprint YAML under the domain's blueprint folder.
@@ -158,6 +180,9 @@ func (c *Client) SaveBlueprint(ctx context.Context, req SaveBlueprintRequest) (b
 	}
 	if req.YAML == "" {
 		return false, invalidArg("yaml is required")
+	}
+	if err := checkBlueprintYAML(req.YAML); err != nil {
+		return false, err
 	}
 	payload := map[string]any{"domain": req.Domain, "path": req.Path, "yaml": req.YAML}
 	if req.SourceURL != "" {

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -40,6 +42,9 @@ type Options struct {
 	MaxImageBytes int64
 	// PingInterval is the WebSocket keepalive interval. Default 30s.
 	PingInterval time.Duration
+	// LookupHost resolves the host of a blueprint import URL before HA is
+	// asked to fetch it. Default net.DefaultResolver.
+	LookupHost func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 // Client talks to one Home Assistant instance. It is safe for concurrent use.
@@ -52,6 +57,7 @@ type Client struct {
 	maxWSMessage   int64
 	maxImage       int64
 	pingInterval   time.Duration
+	lookupHost     func(ctx context.Context, host string) ([]netip.Addr, error)
 
 	wsMu   sync.Mutex
 	ws     *wsConn
@@ -87,6 +93,7 @@ func New(baseURL, token string, opts *Options) (*Client, error) {
 		maxWSMessage:   opts.MaxResponseBytes,
 		maxImage:       opts.MaxImageBytes,
 		pingInterval:   opts.PingInterval,
+		lookupHost:     opts.LookupHost,
 	}
 	if c.requestTimeout <= 0 {
 		c.requestTimeout = defaultRequestTimeout
@@ -100,6 +107,11 @@ func New(baseURL, token string, opts *Options) (*Client, error) {
 	}
 	if c.pingInterval <= 0 {
 		c.pingInterval = defaultPingInterval
+	}
+	if c.lookupHost == nil {
+		c.lookupHost = func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		}
 	}
 	return c, nil
 }
