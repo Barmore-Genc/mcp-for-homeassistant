@@ -14,12 +14,14 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/homeassistant"
 	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/oauth"
 	sdkauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type Server struct {
+	ha      *homeassistant.Client
 	signer  *oauth.Signer
 	origin  string
 	version string
@@ -31,8 +33,8 @@ type Server struct {
 	now func() time.Time
 }
 
-func New(signer *oauth.Signer, origin, version string, readOnly bool) *Server {
-	return &Server{signer: signer, origin: origin, version: version, readOnly: readOnly, now: time.Now}
+func New(ha *homeassistant.Client, signer *oauth.Signer, origin, version string, readOnly bool) *Server {
+	return &Server{ha: ha, signer: signer, origin: origin, version: version, readOnly: readOnly, now: time.Now}
 }
 
 // Handler is the http.Handler to mount at /mcp. A request without a valid
@@ -64,11 +66,9 @@ func (s *Server) build() *mcp.Server {
 	}, &mcp.ServerOptions{
 		Instructions: "Tools for reading and changing a Home Assistant instance.",
 	})
-	s.addReadTools(srv)
-	if !s.readOnly {
-		s.addWriteTools(srv)
-		s.addManageTools(srv)
-	}
+	s.addAutomationTools(srv)
+	s.addStateTools(srv)
+	s.addOrganizeTools(srv)
 	return srv
 }
 

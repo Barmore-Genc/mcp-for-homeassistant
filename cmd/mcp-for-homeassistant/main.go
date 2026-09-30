@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/config"
+	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/homeassistant"
 	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/mcpserver"
 	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/oauth"
 	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/server"
@@ -42,7 +43,13 @@ func main() {
 	}
 	signer := oauth.NewSigner(secret)
 
-	mcpSrv := mcpserver.New(signer, cfg.Origin, version, cfg.ReadOnly)
+	ha, err := homeassistant.New(cfg.HAURL, cfg.HAToken, nil)
+	if err != nil {
+		log.Fatalf("home assistant client: %v", err)
+	}
+	defer ha.Close()
+
+	mcpSrv := mcpserver.New(ha, signer, cfg.Origin, version, cfg.ReadOnly)
 	srv := server.New(cfg, signer, mcpSrv.Handler())
 
 	httpSrv := &http.Server{

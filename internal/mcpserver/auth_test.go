@@ -12,7 +12,7 @@ import (
 
 func newHandler(t *testing.T, signer *oauth.Signer) http.Handler {
 	t.Helper()
-	return New(signer, "https://mcp.example", "test", false).Handler()
+	return New(nil, signer, "https://mcp.example", "test", false).Handler()
 }
 
 // An unauthenticated call has to be refused before it reaches a tool, and the

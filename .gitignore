@@ -1,2 +1,5 @@
 /mcp-for-homeassistant
 /dist/
+
+/dev/ha-test/config/
+/dev/ha-test/env
