@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -49,9 +50,19 @@ func (e *Error) Error() string {
 	}
 	if e.Message != "" {
 		b.WriteString(": ")
-		b.WriteString(e.Message)
+		b.WriteString(oneLine(e.Message))
 	}
 	return b.String()
+}
+
+// oneLine collapses line breaks and other control characters into spaces, so
+// a message from HA cannot add lines that read like the caller's own output.
+func oneLine(s string) string {
+	isBreak := func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' }
+	if strings.IndexFunc(s, isBreak) < 0 {
+		return s
+	}
+	return strings.Join(strings.FieldsFunc(s, isBreak), " ")
 }
 
 // IsNotFound reports whether err is a Home Assistant "not found" error.

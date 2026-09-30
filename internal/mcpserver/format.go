@@ -50,7 +50,7 @@ func parseDate(s string, now time.Time) (time.Time, error) {
 // truncate keeps free-text fields from dominating a list line. The ellipsis is
 // there so the model can tell the difference between a short memo and a cut one.
 func truncate(s string, n int) string {
-	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
+	s = oneLine(strings.TrimSpace(s))
 	if len(s) <= n {
 		return s
 	}

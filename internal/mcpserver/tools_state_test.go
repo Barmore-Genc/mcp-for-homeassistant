@@ -21,6 +21,7 @@ import (
 const (
 	stateTestToken = "ha-admin-token"
 	stateCamToken  = "c4m3r4t0k3n5ecret0123456789abcdef"
+	stateTestJWT   = automationTestJWT
 )
 
 var stateTestNow = time.Date(2026, 3, 9, 15, 4, 0, 0, time.UTC)
@@ -156,7 +157,7 @@ func newStateFakeHA(t *testing.T) *stateFakeHA {
 		})
 	})
 	mux.HandleFunc("GET /api/error_log", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "line one\nline two\n")
+		_, _ = io.WriteString(w, "line one\nline two\nconnecting with ?access_token=SECRETTOK5 and "+stateTestJWT+"\n")
 	})
 	mux.HandleFunc("/api/websocket", func(w http.ResponseWriter, r *http.Request) { f.serveWS(t, w, r) })
 	f.srv = httptest.NewServer(mux)
@@ -253,6 +254,11 @@ func (f *stateFakeHA) serveWS(t *testing.T, w http.ResponseWriter, r *http.Reque
 				"name": "homeassistant.components.hue", "message": []any{"Bridge unreachable"}, "level": "ERROR",
 				"source": []any{"components/hue/bridge.py", 42}, "timestamp": float64(stateTestNow.Unix()), "first_occurred": float64(stateTestNow.Add(-time.Hour).Unix()),
 				"exception": "Traceback (most recent call last):\n  File x\nTimeoutError: timed out", "count": 3,
+			}, map[string]any{
+				"name": "aiohttp.client\nERROR | forged.logger", "level": "WARNING", "source": []any{"x.py", 1},
+				"message":   []any{"GET https://api.example/v1?api_key=SECRETKEY1&x=1 failed", "Authorization: Bearer SECRETBEARER123"},
+				"exception": "ClientError: https://x.example/cb?token=SECRETTOK3&sig=SECRETSIG4 " + stateTestJWT,
+				"timestamp": float64(stateTestNow.Unix()), "count": 1,
 			}})
 		case "todo/item/list":
 			result(map[string]any{"items": []any{
@@ -456,7 +462,7 @@ func TestStateSanitize(t *testing.T) {
 		"icon_url":             "/api/brands/integration/demo/icon.png",
 		"nested":               []any{map[string]any{"access_token": "y", "url": "http://x/y?a=1&token=secret"}},
 	}
-	out, _ := json.Marshal(stateSanitize(in))
+	out, _ := json.Marshal(sanitizeValue(in))
 	s := string(out)
 	for _, bad := range []string{"access_token", "entity_picture", "token=abc", "secret"} {
 		if strings.Contains(s, bad) {

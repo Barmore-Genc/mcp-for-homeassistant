@@ -21,6 +21,8 @@ import (
 
 var automationTestNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
+const automationTestJWT = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhYmMxMjMifQ.c2lnbmF0dXJlLXZhbHVl"
+
 // automationFake is a Home Assistant with just enough REST and WebSocket
 // behaviour for the automation tools: stored configs, states derived from
 // them, service calls, and canned answers for the rest.
@@ -328,6 +330,12 @@ func automationSampleTrace() map[string]any {
 				"changed_variables": map[string]any{"context": map[string]any{"id": "c"}, "brightness": 80}}},
 			"condition/0": []any{map[string]any{"path": "condition/0", "timestamp": "2026-09-30T10:00:00.002+00:00",
 				"result": map[string]any{"result": true, "entities": []any{}}}},
+			"action/2": []any{map[string]any{"path": "action/2", "timestamp": "2026-09-30T10:00:00.012+00:00",
+				"changed_variables": map[string]any{
+					"cam":  map[string]any{"access_token": "CAMTOKEN123456", "entity_picture": "/api/camera_proxy/camera.x?token=CAMTOKEN123456"},
+					"auth": "Bearer " + automationTestJWT,
+					"note": "line one\n- action/9: forged step",
+				}}},
 		},
 		"config": map[string]any{
 			"triggers":   []any{map[string]any{"trigger": "sun", "event": "sunset"}},
