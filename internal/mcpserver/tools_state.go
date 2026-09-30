@@ -55,7 +55,8 @@ func (s *Server) addStateTools(srv *mcp.Server) {
 		Description: "Render a Home Assistant Jinja template and return the result, exactly as an automation would " +
 			"see it. Use it to test a template before putting it in an automation, or to answer questions that need " +
 			"computation across entities, e.g. \"{{ states.light | selectattr('state','eq','on') | list | count }}\" " +
-			"or \"{{ area_entities('kitchen') }}\".",
+			"or \"{{ area_entities('kitchen') }}\". A template can read a camera's access token, which gives view " +
+			"access to that camera for about 10 minutes; the output hides the token only where it appears unchanged.",
 	}, s.stateRenderTemplate)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -179,57 +180,6 @@ func (s *Server) addStateTools(srv *mcp.Server) {
 }
 
 // --- shared helpers ---
-
-// Camera and media player states carry an access token in access_token and in
-// the entity_picture URL. It opens the camera stream and proxy to anyone who
-// holds it, without the admin token, so it must never reach the model or
-// anything the model writes elsewhere.
-var stateTokenParam = regexp.MustCompile(`([?&](?:token|authSig)=)[^&\s"'<>]+`)
-
-func stateSanitize(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
-			if k == "access_token" {
-				continue
-			}
-			if str, ok := val.(string); ok && strings.HasPrefix(k, "entity_picture") && stateTokenParam.MatchString(str) {
-				continue
-			}
-			out[k] = stateSanitize(val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, val := range t {
-			out[i] = stateSanitize(val)
-		}
-		return out
-	case string:
-		return stateTokenParam.ReplaceAllString(t, "${1}REDACTED")
-	default:
-		return v
-	}
-}
-
-func stateSanitizeAttrs(attrs map[string]any) map[string]any {
-	if attrs == nil {
-		return nil
-	}
-	return stateSanitize(attrs).(map[string]any)
-}
-
-// stateSanitizeJSON returns sanitized compact JSON, or the input unchanged when
-// it is not JSON.
-func stateSanitizeJSON(raw []byte) string {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return stateTokenParam.ReplaceAllString(string(raw), "${1}REDACTED")
-	}
-	b, _ := json.Marshal(stateSanitize(v))
-	return string(b)
-}
 
 func stateValue(v any) string {
 	switch t := v.(type) {
@@ -443,7 +393,7 @@ func (r *stateRegistry) areaID(entityID string) string {
 func (r *stateRegistry) areaName(entityID string) string {
 	id := r.areaID(entityID)
 	if a, ok := r.areas[id]; ok {
-		return a.Name
+		return oneLine(a.Name)
 	}
 	return id
 }
@@ -452,7 +402,7 @@ func (r *stateRegistry) labelNames(ids []string) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		if l, ok := r.labels[id]; ok {
-			out = append(out, l.Name)
+			out = append(out, oneLine(l.Name))
 		} else {
 			out = append(out, id)
 		}
@@ -462,7 +412,7 @@ func (r *stateRegistry) labelNames(ids []string) []string {
 
 func stateName(st homeassistant.State) string {
 	if n, ok := st.Attributes["friendly_name"].(string); ok && n != "" {
-		return n
+		return oneLine(n)
 	}
 	return st.EntityID
 }
@@ -470,7 +420,7 @@ func stateName(st homeassistant.State) string {
 func stateWithUnit(st homeassistant.State) string {
 	v := truncate(st.State, 80)
 	if u, ok := st.Attributes["unit_of_measurement"].(string); ok && u != "" {
-		v += " " + u
+		v += " " + oneLine(u)
 	}
 	return v
 }
@@ -632,7 +582,7 @@ func stateMatchRegistry[T any](kind, q string, items map[string]T, idName func(T
 	var names []string
 	for _, it := range items {
 		id, name := idName(it)
-		names = append(names, name)
+		names = append(names, oneLine(name))
 		switch {
 		case strings.ToLower(id) == ql || strings.ToLower(name) == ql:
 			exact[id] = true
@@ -707,7 +657,7 @@ func (s *Server) stateGetState(ctx context.Context, _ *mcp.CallToolRequest, in s
 		} else {
 			b.WriteString("registry: not in the entity registry (no unique id), so it cannot have an area or labels\n")
 		}
-		attrs := stateSanitizeAttrs(st.Attributes)
+		attrs := sanitizeAttrs(st.Attributes)
 		keys := make([]string, 0, len(attrs))
 		for k, v := range attrs {
 			if k == "friendly_name" || k == "unit_of_measurement" || v == nil {
@@ -719,7 +669,7 @@ func (s *Server) stateGetState(ctx context.Context, _ *mcp.CallToolRequest, in s
 		if len(keys) > 0 {
 			b.WriteString("attributes:\n")
 			for _, k := range keys {
-				fmt.Fprintf(&b, "  %s: %s\n", k, truncate(stateValue(attrs[k]), 2000))
+				fmt.Fprintf(&b, "  %s: %s\n", oneLine(k), truncate(stateValue(attrs[k]), 2000))
 			}
 		}
 	}
@@ -740,7 +690,7 @@ func (s *Server) stateWriteRegistry(b *strings.Builder, reg *stateRegistry, e ho
 			if d.Manufacturer != nil && *d.Manufacturer != "" {
 				desc += " by " + *d.Manufacturer
 			}
-			parts = append(parts, fmt.Sprintf("device %s (id %s)", desc, d.ID))
+			parts = append(parts, fmt.Sprintf("device %s (id %s)", oneLine(desc), d.ID))
 		}
 	}
 	if len(e.Labels) > 0 {
@@ -866,7 +816,7 @@ func stateWriteService(b *strings.Builder, domain, name string, svc homeassistan
 		svc.Description = t
 	}
 	if svc.Name != "" && !strings.EqualFold(svc.Name, name) {
-		fmt.Fprintf(b, " (%s)", svc.Name)
+		fmt.Fprintf(b, " (%s)", oneLine(svc.Name))
 	}
 	if t := stateDescribeTarget(svc.Target); t != "" {
 		fmt.Fprintf(b, " | target: %s", t)
@@ -913,7 +863,7 @@ func stateWriteFields(b *strings.Builder, fields map[string]json.RawMessage, ind
 		if f.Example != nil {
 			parts = append(parts, "e.g. "+truncate(stateValue(f.Example), 80))
 		}
-		fmt.Fprintf(b, "%s%s: %s", indent, name, strings.Join(parts, ", "))
+		fmt.Fprintf(b, "%s%s: %s", indent, oneLine(name), strings.Join(parts, ", "))
 		if f.Description != "" {
 			fmt.Fprintf(b, " | %s", truncate(f.Description, 200))
 		}
@@ -1056,14 +1006,9 @@ func (s *Server) stateRenderTemplate(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return fail(err)
 	}
-	// A template can read any attribute, so the camera tokens are scrubbed
-	// from the output by value as well as by the URL pattern.
-	for _, st := range states {
-		if tok, ok := st.Attributes["access_token"].(string); ok && len(tok) >= 8 {
-			out = strings.ReplaceAll(out, tok, "REDACTED")
-		}
-	}
-	out = stateTokenParam.ReplaceAllString(out, "${1}REDACTED")
+	// A template that transforms the token gets past this; the tool
+	// description says so.
+	out = redactSecrets(redactAccessTokens(out, states))
 	if len(out) > 50000 {
 		out = out[:50000] + "\n… output cut at 50000 characters"
 	}
@@ -1127,10 +1072,10 @@ func (s *Server) stateHistory(ctx context.Context, _ *mcp.CallToolRequest, in st
 		name, unit := id, ""
 		if a := entries[0].Attributes; a != nil {
 			if n, ok := a["friendly_name"].(string); ok {
-				name = n
+				name = oneLine(n)
 			}
 			if u, ok := a["unit_of_measurement"].(string); ok {
-				unit = u
+				unit = oneLine(u)
 			}
 		}
 		var pts []stateHistPoint
@@ -1141,7 +1086,7 @@ func (s *Server) stateHistory(ctx context.Context, _ *mcp.CallToolRequest, in st
 				if !ok {
 					continue
 				}
-				v = stateValue(stateSanitize(av))
+				v = stateValue(sanitizeValue(av))
 				unit = ""
 			}
 			t := e.LastChanged
@@ -1361,10 +1306,10 @@ func (s *Server) stateLogbook(ctx context.Context, _ *mcp.CallToolRequest, in st
 		if what == "" && e.State != "" {
 			what = "changed to " + e.State
 		}
-		who := e.Name
+		who := oneLine(e.Name)
 		switch {
 		case e.EntityID != "" && e.Name != "" && e.Name != e.EntityID:
-			who = fmt.Sprintf("%s (%s)", e.Name, e.EntityID)
+			who = fmt.Sprintf("%s (%s)", oneLine(e.Name), e.EntityID)
 		case e.EntityID != "":
 			who = e.EntityID
 		}
@@ -1386,7 +1331,7 @@ func stateLogbookCause(e homeassistant.LogbookEntry, users map[string]string) st
 			name = e.ContextName
 		}
 		if name != "" && name != e.ContextEntityID {
-			parts = append(parts, fmt.Sprintf("triggered by %s (%s)", name, e.ContextEntityID))
+			parts = append(parts, fmt.Sprintf("triggered by %s (%s)", oneLine(name), e.ContextEntityID))
 		} else {
 			parts = append(parts, "triggered by "+e.ContextEntityID)
 		}
@@ -1396,11 +1341,11 @@ func stateLogbookCause(e homeassistant.LogbookEntry, users map[string]string) st
 	case e.ContextEventType == "call_service" && e.ContextDomain != "":
 		parts = append(parts, fmt.Sprintf("service %s.%s", e.ContextDomain, e.ContextService))
 	case e.ContextEventType != "" && e.ContextEventType != "state_changed":
-		parts = append(parts, "event "+e.ContextEventType)
+		parts = append(parts, "event "+oneLine(e.ContextEventType))
 	}
 	if e.ContextUserID != "" {
 		if n, ok := users[e.ContextUserID]; ok {
-			parts = append(parts, "by "+n)
+			parts = append(parts, "by "+oneLine(n))
 		} else {
 			parts = append(parts, "by user "+e.ContextUserID)
 		}
@@ -1483,10 +1428,10 @@ func (s *Server) stateStatistics(ctx context.Context, _ *mcp.CallToolRequest, in
 		}
 		name := id
 		if m.Name != nil && *m.Name != "" {
-			name = fmt.Sprintf("%s (%s)", id, *m.Name)
+			name = fmt.Sprintf("%s (%s)", id, oneLine(*m.Name))
 		}
 		if unit != "" {
-			name += " in " + unit
+			name += " in " + oneLine(unit)
 		}
 		if len(rows) == 0 {
 			fmt.Fprintf(&b, "%s: no data in this range\n", name)
@@ -1565,7 +1510,7 @@ func (s *Server) stateListStatistics(meta []homeassistant.StatisticMetadata, sea
 		if name != "" {
 			line += " | " + name
 		}
-		lines = append(lines, fmt.Sprintf("%s | %s | %s | source %s", line, unit, kind, m.Source))
+		lines = append(lines, oneLine(fmt.Sprintf("%s | %s | %s | source %s", line, unit, kind, m.Source)))
 	}
 	if len(lines) == 0 {
 		return text("No statistics match."), nil, nil
@@ -1591,6 +1536,11 @@ type stateListenEventsInput struct {
 	MaxEvents int    `json:"max_events,omitempty" jsonschema:"stop after this many events, default 25, at most 200"`
 }
 
+// stateListenSlots bounds concurrent ha_listen_events calls. Each holds a
+// subscription on the one HA connection for up to two minutes, and that
+// connection allows 64 subscriptions in total, which the other tools also need.
+var stateListenSlots = make(chan struct{}, 8)
+
 func (s *Server) stateListenEvents(ctx context.Context, _ *mcp.CallToolRequest, in stateListenEventsInput) (*mcp.CallToolResult, any, error) {
 	secs := in.Seconds
 	if secs <= 0 {
@@ -1604,6 +1554,13 @@ func (s *Server) stateListenEvents(ctx context.Context, _ *mcp.CallToolRequest, 
 		maxEvents = 25
 	}
 	maxEvents = min(maxEvents, 200)
+
+	select {
+	case stateListenSlots <- struct{}{}:
+		defer func() { <-stateListenSlots }()
+	default:
+		return fail(fmt.Errorf("%d ha_listen_events calls are already running, which is the most at once; try again when one has finished", cap(stateListenSlots)))
+	}
 
 	// The subscription gets the request context rather than the listening
 	// window so that the window ending does not close it from another
@@ -1664,7 +1621,7 @@ func (s *Server) stateListenEvents(ctx context.Context, _ *mcp.CallToolRequest, 
 		sort.SliceStable(keys, func(i, j int) bool { return byType[keys[i]] > byType[keys[j]] })
 		parts := make([]string, len(keys))
 		for i, k := range keys {
-			parts[i] = fmt.Sprintf("%s %d", k, byType[k])
+			parts[i] = fmt.Sprintf("%s %d", oneLine(k), byType[k])
 		}
 		fmt.Fprintf(&b, "By type: %s\n", strings.Join(parts, ", "))
 	}
@@ -1673,7 +1630,7 @@ func (s *Server) stateListenEvents(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 	loc := s.now().Location()
 	for _, ev := range events {
-		fmt.Fprintf(&b, "%s %s %s\n", ev.TimeFired.In(loc).Format("15:04:05.000"), ev.EventType, stateDescribeEvent(ev))
+		fmt.Fprintf(&b, "%s %s %s\n", ev.TimeFired.In(loc).Format("15:04:05.000"), oneLine(ev.EventType), oneLine(stateDescribeEvent(ev)))
 	}
 	return text(b.String()), nil, nil
 }
@@ -1730,7 +1687,7 @@ func stateDescribeEvent(ev homeassistant.Event) string {
 			return line
 		}
 	}
-	return truncate(stateSanitizeJSON(ev.Data), 1500)
+	return truncate(sanitizeJSON(ev.Data), 1500)
 }
 
 func stateChangedAttrs(a, b map[string]any) []string {
@@ -1774,9 +1731,12 @@ func (s *Server) stateSystemLog(ctx context.Context, _ *mcp.CallToolRequest, in 
 		if strings.EqualFold(in.Level, "error") && e.Level != "ERROR" && e.Level != "CRITICAL" {
 			continue
 		}
-		src := stateLogSource(e.Source)
-		msg := strings.Join(e.Message, " / ")
-		if q != "" && !strings.Contains(strings.ToLower(e.Name+" "+src+" "+msg+" "+e.Exception), q) {
+		src := oneLine(stateLogSource(e.Source))
+		msg := redactSecrets(strings.Join(e.Message, " / "))
+		exc := redactSecrets(e.Exception)
+		// Searching the redacted text keeps search from confirming a secret
+		// one guessed character at a time.
+		if q != "" && !strings.Contains(strings.ToLower(e.Name+" "+src+" "+msg+" "+exc), q) {
 			continue
 		}
 		n++
@@ -1787,13 +1747,13 @@ func (s *Server) stateSystemLog(ctx context.Context, _ *mcp.CallToolRequest, in 
 		if e.Count > 1 {
 			count = fmt.Sprintf(" ×%d", e.Count)
 		}
-		fmt.Fprintf(&b, "%s%s | %s | %s | last %s", e.Level, count, e.Name, src, s.stateTime(e.Timestamp.Time))
+		fmt.Fprintf(&b, "%s%s | %s | %s | last %s", oneLine(e.Level), count, oneLine(e.Name), src, s.stateTime(e.Timestamp.Time))
 		if e.Count > 1 && !e.FirstOccurred.IsZero() {
 			fmt.Fprintf(&b, ", first %s", s.stateTime(e.FirstOccurred.Time))
 		}
 		fmt.Fprintf(&b, "\n  %s\n", truncate(msg, 500))
-		if e.Exception != "" {
-			lines := strings.Split(strings.TrimSpace(e.Exception), "\n")
+		if exc != "" {
+			lines := strings.Split(strings.TrimSpace(exc), "\n")
 			for _, l := range lines[max(0, len(lines)-3):] {
 				fmt.Fprintf(&b, "  | %s\n", truncate(l, 300))
 			}
@@ -1830,7 +1790,7 @@ func (s *Server) stateSystemLog(ctx context.Context, _ *mcp.CallToolRequest, in 
 			}
 			fmt.Fprintf(&out, "\nLast %d lines of home-assistant.log:\n", len(all))
 			for _, l := range all {
-				out.WriteString(stateTokenParam.ReplaceAllString(truncate(l, 1000), "${1}REDACTED"))
+				out.WriteString(truncate(redactSecrets(l), 1000))
 				out.WriteString("\n")
 			}
 		}
@@ -1896,7 +1856,7 @@ func (s *Server) stateCalendarEvents(ctx context.Context, _ *mcp.CallToolRequest
 		var b strings.Builder
 		fmt.Fprintf(&b, "%d calendars:\n", len(cals))
 		for _, c := range cals {
-			fmt.Fprintf(&b, "%s | %s\n", c.EntityID, c.Name)
+			fmt.Fprintf(&b, "%s | %s\n", c.EntityID, oneLine(c.Name))
 		}
 		return text(b.String()), nil, nil
 	}
@@ -1937,12 +1897,12 @@ func (s *Server) stateCalendarEvents(ctx context.Context, _ *mcp.CallToolRequest
 			fmt.Fprintf(&b, " | %s", truncate(*e.Description, 300))
 		}
 		if e.RRule != nil && *e.RRule != "" {
-			fmt.Fprintf(&b, " | repeats %s", *e.RRule)
+			fmt.Fprintf(&b, " | repeats %s", oneLine(*e.RRule))
 		}
 		if e.UID != nil && *e.UID != "" {
-			fmt.Fprintf(&b, " | uid %s", *e.UID)
+			fmt.Fprintf(&b, " | uid %s", oneLine(*e.UID))
 			if e.RecurrenceID != nil && *e.RecurrenceID != "" {
-				fmt.Fprintf(&b, " recurrence_id %s", *e.RecurrenceID)
+				fmt.Fprintf(&b, " recurrence_id %s", oneLine(*e.RecurrenceID))
 			}
 		}
 		b.WriteString("\n")
@@ -1994,7 +1954,7 @@ func (s *Server) stateListTodoItems(ctx context.Context, _ *mcp.CallToolRequest,
 				continue
 			}
 			n++
-			fmt.Fprintf(&b, "%s | %s | %s open\n", st.EntityID, stateName(st), st.State)
+			fmt.Fprintf(&b, "%s | %s | %s open\n", st.EntityID, stateName(st), truncate(st.State, 80))
 		}
 		if n == 0 {
 			return text("There are no to-do lists."), nil, nil
@@ -2026,12 +1986,12 @@ func (s *Server) stateListTodoItems(ctx context.Context, _ *mcp.CallToolRequest,
 		for _, it := range list {
 			fmt.Fprintf(&b, "%s %s", mark, truncate(it.Summary, 200))
 			if it.Due != nil && *it.Due != "" {
-				fmt.Fprintf(&b, " | due %s", *it.Due)
+				fmt.Fprintf(&b, " | due %s", oneLine(*it.Due))
 			}
 			if it.Description != nil && *it.Description != "" {
 				fmt.Fprintf(&b, " | %s", truncate(*it.Description, 300))
 			}
-			fmt.Fprintf(&b, " | uid %s\n", it.UID)
+			fmt.Fprintf(&b, " | uid %s\n", oneLine(it.UID))
 		}
 	}
 	if in.Status != "completed" {
@@ -2079,9 +2039,9 @@ func (s *Server) stateListNotifications(ctx context.Context, _ *mcp.CallToolRequ
 	for _, n := range ns {
 		title := ""
 		if n.Title != nil && *n.Title != "" {
-			title = *n.Title + ": "
+			title = oneLine(*n.Title) + ": "
 		}
-		fmt.Fprintf(&b, "%s | %s | %s%s\n", n.NotificationID, s.stateTime(n.CreatedAt), title, truncate(n.Message, 800))
+		fmt.Fprintf(&b, "%s | %s | %s%s\n", oneLine(n.NotificationID), s.stateTime(n.CreatedAt), title, truncate(n.Message, 800))
 	}
 	return text(b.String()), nil, nil
 }
@@ -2147,7 +2107,7 @@ func (s *Server) stateCallService(ctx context.Context, _ *mcp.CallToolRequest, i
 		}
 	}
 	if hasResponse {
-		resp := stateSanitizeJSON(res.Response)
+		resp := sanitizeJSON(res.Response)
 		if len(resp) > 50000 {
 			resp = resp[:50000] + " … response cut at 50000 characters"
 		}

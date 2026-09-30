@@ -138,11 +138,11 @@ type automationItem struct {
 func (it *automationItem) label() string {
 	switch {
 	case it.entityID != "" && it.configID != "":
-		return fmt.Sprintf("%s (id %s)", it.entityID, it.configID)
+		return fmt.Sprintf("%s (id %s)", it.entityID, oneLine(it.configID))
 	case it.entityID != "":
 		return it.entityID
 	default:
-		return fmt.Sprintf("%s id %s", it.kind, it.configID)
+		return fmt.Sprintf("%s id %s", it.kind, oneLine(it.configID))
 	}
 }
 
@@ -350,10 +350,10 @@ func (s *Server) automationStatus(kind homeassistant.ConfigKind, st *homeassista
 		if st.State == "on" {
 			parts = append(parts, "running")
 		} else if st.State != "off" {
-			parts = append(parts, st.State)
+			parts = append(parts, truncate(st.State, 80))
 		}
 	default:
-		parts = append(parts, st.State)
+		parts = append(parts, truncate(st.State, 80))
 		if n, ok := st.Attributes["current"].(float64); ok && n > 0 {
 			parts = append(parts, fmt.Sprintf("running (%d)", int(n)))
 		}
@@ -422,7 +422,17 @@ func (s *Server) automationTraces(ctx context.Context, _ *mcp.CallToolRequest, i
 	if in.RunID == "" {
 		return s.automationTraceList(ctx, it.kind, it)
 	}
-	raw, err := s.ha.GetTrace(ctx, homeassistant.TraceDomain(it.kind), it.configID, strings.TrimSpace(in.RunID))
+	var (
+		raw    json.RawMessage
+		states []homeassistant.State
+	)
+	err = stateAll(
+		func() (err error) {
+			raw, err = s.ha.GetTrace(ctx, homeassistant.TraceDomain(it.kind), it.configID, strings.TrimSpace(in.RunID))
+			return
+		},
+		func() (err error) { states, err = s.ha.ListStates(ctx); return },
+	)
 	if homeassistant.IsNotFound(err) {
 		return fail(fmt.Errorf("no stored run %s for %s; HA keeps only the last few, list them without run_id", in.RunID, it.label()))
 	}
@@ -430,7 +440,7 @@ func (s *Server) automationTraces(ctx context.Context, _ *mcp.CallToolRequest, i
 		return fail(err)
 	}
 	var tr automationTrace
-	if err := json.Unmarshal(raw, &tr); err != nil {
+	if err := json.Unmarshal([]byte(redactAccessTokens(sanitizeJSON(raw), states)), &tr); err != nil {
 		return fail(fmt.Errorf("could not read the trace: %w", err))
 	}
 	if in.Step != "" {
@@ -493,23 +503,25 @@ func (s *Server) automationTraceList(ctx context.Context, kind homeassistant.Con
 		}
 		fmt.Fprintf(&b, " %s", automationOutcome(t.State, t.ScriptExecution, t.Timestamp.Start, t.Timestamp.Finish))
 		if t.Error != nil && *t.Error != "" {
-			fmt.Fprintf(&b, " at %s: %s", automationDeref(t.LastStep), *t.Error)
+			fmt.Fprintf(&b, " at %s: %s", automationText(t.LastStep), automationText(t.Error))
 		} else if t.LastStep != nil && automationStoppedEarly(t.ScriptExecution) {
-			fmt.Fprintf(&b, " at %s", *t.LastStep)
+			fmt.Fprintf(&b, " at %s", automationText(t.LastStep))
 		}
 		if t.Trigger != nil && *t.Trigger != "" {
-			fmt.Fprintf(&b, "; trigger: %s", *t.Trigger)
+			fmt.Fprintf(&b, "; trigger: %s", automationText(t.Trigger))
 		}
 		b.WriteString("\n")
 	}
 	return text(strings.TrimRight(b.String(), "\n")), nil, nil
 }
 
-func automationDeref(s *string) string {
+// automationText renders a text field of a trace summary, which can quote
+// variable values and error messages from anywhere in HA.
+func automationText(s *string) string {
 	if s == nil {
 		return ""
 	}
-	return *s
+	return oneLine(redactSecrets(*s))
 }
 
 func automationStoppedEarly(exec *string) bool {
@@ -588,17 +600,17 @@ func (s *Server) automationRenderTrace(it *automationItem, tr *automationTrace) 
 	fmt.Fprintf(&b, "started %s, %s", s.automationTime(tr.Timestamp.Start),
 		automationOutcome(tr.State, tr.ScriptExecution, tr.Timestamp.Start, tr.Timestamp.Finish))
 	if tr.LastStep != nil {
-		fmt.Fprintf(&b, ", last step %s", *tr.LastStep)
+		fmt.Fprintf(&b, ", last step %s", oneLine(*tr.LastStep))
 	}
 	b.WriteString("\n")
 	if tr.Error != nil && *tr.Error != "" {
-		fmt.Fprintf(&b, "error: %s\n", *tr.Error)
+		fmt.Fprintf(&b, "error: %s\n", oneLine(*tr.Error))
 	}
 	if tr.Trigger != nil && *tr.Trigger != "" {
-		fmt.Fprintf(&b, "trigger: %s\n", *tr.Trigger)
+		fmt.Fprintf(&b, "trigger: %s\n", oneLine(*tr.Trigger))
 	}
 	if bp, ok := tr.BlueprintInputs["use_blueprint"].(map[string]any); ok {
-		fmt.Fprintf(&b, "blueprint: %v, inputs %s\n", bp["path"], automationCompact(bp["input"], 400))
+		fmt.Fprintf(&b, "blueprint: %s, inputs %s\n", automationCompact(bp["path"], 200), automationCompact(bp["input"], 400))
 	}
 
 	type step struct {
@@ -636,7 +648,7 @@ func (s *Server) automationRenderTrace(it *automationItem, tr *automationTrace) 
 				break
 			}
 			b.WriteString("- ")
-			b.WriteString(st.path)
+			b.WriteString(oneLine(st.path))
 			if len(st.entries) > 1 {
 				fmt.Fprintf(&b, " #%d", j+1)
 			}
@@ -668,7 +680,7 @@ func automationRenderStep(e automationTraceEntry) string {
 	var res map[string]any
 	if len(e.Result) > 0 && json.Unmarshal(e.Result, &res) == nil && res != nil {
 		if params, ok := res["params"].(map[string]any); ok {
-			call := fmt.Sprintf("%v.%v", params["domain"], params["service"])
+			call := oneLine(fmt.Sprintf("%v.%v", params["domain"], params["service"]))
 			if t, ok := params["target"].(map[string]any); ok && len(t) > 0 {
 				call += " target " + automationCompact(t, 300)
 			}
@@ -692,7 +704,7 @@ func automationRenderStep(e automationTraceEntry) string {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			parts = append(parts, k+"="+automationCompact(res[k], 300))
+			parts = append(parts, oneLine(k)+"="+automationCompact(res[k], 300))
 		}
 	}
 	var vars []string
@@ -700,14 +712,14 @@ func automationRenderStep(e automationTraceEntry) string {
 		if k == "this" || k == "trigger" || k == "context" {
 			continue
 		}
-		vars = append(vars, k+"="+automationCompact(v, 200))
+		vars = append(vars, oneLine(k)+"="+automationCompact(v, 200))
 	}
 	if len(vars) > 0 {
 		sort.Strings(vars)
 		parts = append(parts, "set "+strings.Join(vars, ", "))
 	}
 	if e.Error != "" {
-		parts = append(parts, "ERROR: "+e.Error)
+		parts = append(parts, "ERROR: "+oneLine(e.Error))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -720,6 +732,7 @@ func automationDescribeTrigger(t map[string]any) string {
 	if desc == "" {
 		desc = fmt.Sprintf("%v trigger", t["platform"])
 	}
+	desc = truncate(desc, 300)
 	if id, ok := t["id"].(string); ok && id != "" && id != fmt.Sprint(t["idx"]) {
 		desc += fmt.Sprintf(" (trigger id %q)", id)
 	}
@@ -740,7 +753,7 @@ func automationStateOf(st map[string]any) string {
 	if st == nil {
 		return "(none)"
 	}
-	return fmt.Sprint(st["state"])
+	return truncate(fmt.Sprint(st["state"]), 100)
 }
 
 func automationTraceStep(tr *automationTrace, path string) (*mcp.CallToolResult, any, error) {
@@ -748,10 +761,10 @@ func automationTraceStep(tr *automationTrace, path string) (*mcp.CallToolResult,
 	if !ok {
 		paths := make([]string, 0, len(tr.Trace))
 		for p := range tr.Trace {
-			paths = append(paths, p)
+			paths = append(paths, oneLine(p))
 		}
 		sort.Strings(paths)
-		return fail(fmt.Errorf("run %s has no step %q; its steps are %s", tr.RunID, path, strings.Join(paths, ", ")))
+		return fail(fmt.Errorf("run %s has no step %q; its steps are %s", oneLine(tr.RunID), path, strings.Join(paths, ", ")))
 	}
 	b, _ := json.MarshalIndent(es, "", " ")
 	out := string(b)
@@ -814,15 +827,15 @@ func automationDescribeStep(n any) string {
 	}
 	for _, k := range []string{"action", "service"} {
 		if v, ok := m[k].(string); ok {
-			return v
+			return truncate(v, 100)
 		}
 	}
 	for _, k := range []string{"condition", "trigger", "platform"} {
 		if v, ok := m[k].(string); ok {
 			if e, ok := m["entity_id"]; ok {
-				return fmt.Sprintf("%s %v", v, e)
+				return truncate(fmt.Sprintf("%s %v", v, e), 200)
 			}
-			return v
+			return truncate(v, 100)
 		}
 	}
 	if _, ok := m["conditions"]; ok {
@@ -938,7 +951,7 @@ func automationValidationLines(res *homeassistant.ValidateConfigResponse) ([]str
 		ok = false
 		msg := "invalid"
 		if sec.r.Error != nil {
-			msg += ": " + *sec.r.Error
+			msg += ": " + oneLine(*sec.r.Error)
 		}
 		lines = append(lines, sec.name+": "+msg)
 	}
@@ -1063,7 +1076,7 @@ func automationExtraFields(raw json.RawMessage) string {
 		}
 		out = append(out, fmt.Sprintf("%v (%s)", f["name"], desc))
 	}
-	return strings.Join(out, "; ")
+	return oneLine(strings.Join(out, "; "))
 }
 
 // --- ha_find_related ---
@@ -1175,10 +1188,10 @@ func (s *Server) automationListBlueprints(ctx context.Context, _ *mcp.CallToolRe
 		for _, p := range paths {
 			bp := bps[p]
 			if bp.Error != "" {
-				fmt.Fprintf(&b, "- %s: failed to load: %s\n", p, bp.Error)
+				fmt.Fprintf(&b, "- %s: failed to load: %s\n", oneLine(p), truncate(bp.Error, 500))
 				continue
 			}
-			fmt.Fprintf(&b, "- %s %q", p, fmt.Sprint(bp.Metadata["name"]))
+			fmt.Fprintf(&b, "- %s %q", oneLine(p), fmt.Sprint(bp.Metadata["name"]))
 			if desc, ok := bp.Metadata["description"].(string); ok && desc != "" {
 				fmt.Fprintf(&b, ": %s", truncate(desc, 160))
 			}
@@ -1187,7 +1200,7 @@ func (s *Server) automationListBlueprints(ctx context.Context, _ *mcp.CallToolRe
 				fmt.Fprintf(&b, "  inputs: %s\n", strings.Join(inputs, "; "))
 			}
 			if src, ok := bp.Metadata["source_url"].(string); ok && src != "" {
-				fmt.Fprintf(&b, "  source: %s\n", src)
+				fmt.Fprintf(&b, "  source: %s\n", oneLine(src))
 			}
 		}
 	}
@@ -1216,7 +1229,7 @@ func automationBlueprintInputs(v any) []string {
 		var desc []string
 		if sel, ok := in["selector"].(map[string]any); ok {
 			for st := range sel {
-				desc = append(desc, st)
+				desc = append(desc, oneLine(st))
 			}
 			sort.Strings(desc)
 		}
@@ -1229,7 +1242,7 @@ func automationBlueprintInputs(v any) []string {
 		} else {
 			desc = append(desc, "required")
 		}
-		name := k
+		name := oneLine(k)
 		if n, ok := in["name"].(string); ok && n != "" && !strings.EqualFold(n, strings.ReplaceAll(k, "_", " ")) {
 			name += fmt.Sprintf(" %q", n)
 		}
@@ -1502,7 +1515,7 @@ func (s *Server) automationControl(ctx context.Context, kind homeassistant.Confi
 				t := traces[0]
 				msg += fmt.Sprintf(" Run %s %s", t.RunID, automationOutcome(t.State, t.ScriptExecution, t.Timestamp.Start, t.Timestamp.Finish))
 				if t.Error != nil && *t.Error != "" {
-					msg += fmt.Sprintf(" at %s: %s", automationDeref(t.LastStep), *t.Error)
+					msg += fmt.Sprintf(" at %s: %s", automationText(t.LastStep), automationText(t.Error))
 				}
 				msg += ". Details with ha_traces."
 			}
@@ -1679,8 +1692,15 @@ func automationParseValue(v any) (any, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, fmt.Errorf("the config text is empty")
 	}
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(s), &n); err != nil {
+		return nil, fmt.Errorf("could not parse as YAML or JSON: %w", err)
+	}
+	if err := configYAMLTags(&n); err != nil {
+		return nil, err
+	}
 	var out any
-	if err := yaml.Unmarshal([]byte(s), &out); err != nil {
+	if err := n.Decode(&out); err != nil {
 		return nil, fmt.Errorf("could not parse as YAML or JSON: %w", err)
 	}
 	return automationNormalize(out), nil

@@ -200,14 +200,14 @@ Entities and states:
 - `ha_history`: how entity states changed over a time range, with min, max and average for sensors.
 - `ha_logbook`: what happened and which automation, script or user caused it.
 - `ha_statistics`: long-term statistics per hour, day, week or month, such as daily energy use.
-- `ha_render_template`: render a Jinja template the way an automation would.
+- `ha_render_template`: render a Jinja template the way an automation would. A template can read a camera's access token, which gives view access to that camera for about 10 minutes.
 - `ha_camera_snapshot`: a current image from a camera.
 
 Services and events:
 
 - `ha_list_services`: the services Home Assistant offers, with their fields and descriptions.
 - `ha_call_service` (*write*): call a service, such as `light.turn_on`.
-- `ha_listen_events`: listen on the event bus for a few seconds and return what fired.
+- `ha_listen_events`: listen on the event bus for a few seconds and return what fired. At most 8 listens run at once.
 - `ha_fire_event` (*write*): fire a custom event.
 
 Automations, scripts and scenes:
@@ -219,7 +219,7 @@ Automations, scripts and scenes:
 - `ha_list_device_automations`: the device triggers, conditions and actions a device offers.
 - `ha_find_related`: everything connected to an entity, device, area, automation or blueprint.
 - `ha_list_blueprints`: installed blueprints and their inputs.
-- `ha_manage_blueprint` (*write*): import, write or delete a blueprint.
+- `ha_manage_blueprint` (*write*): import, write or delete a blueprint. Blueprints with YAML tags other than `!input`, such as `!include` or `!secret`, are refused. Imports only accept public hosts, but Home Assistant downloads the URL itself and follows redirects, so where a redirect leads is not checked.
 
 Areas, devices, helpers and integrations:
 
