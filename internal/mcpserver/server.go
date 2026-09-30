@@ -64,12 +64,32 @@ func (s *Server) build() *mcp.Server {
 		Title:   "Home Assistant",
 		Version: s.version,
 	}, &mcp.ServerOptions{
-		Instructions: "Tools for reading and changing a Home Assistant instance.",
+		Instructions: s.instructions(),
 	})
 	s.addAutomationTools(srv)
 	s.addStateTools(srv)
 	s.addOrganizeTools(srv)
 	return srv
+}
+
+const readInstructions = `Home Assistant tools.
+- Start with ha_list_entities to find entity ids and states, ha_list_registry for areas, devices and labels, and ha_get_automation to list automations, scripts and scenes.
+- Check a service's fields with ha_list_services before calling it.
+- To see why an automation or script did or did not act, use ha_traces.
+- Only automations, scripts and scenes created in the UI (with a config id) can be read as config and edited; ones written in YAML files are read-only here.`
+
+const writeInstructions = `
+- Validate drafts with ha_validate_config. For an edit, read the config with ha_get_automation, change it and save it whole with ha_manage_automation, which validates again before saving.
+- Before renaming or deleting an entity, device, area, helper, automation, script or blueprint, run ha_find_related to see what uses it.
+- Enable, disable and trigger automations, run scripts and activate scenes with ha_manage_automation, not ha_call_service.
+- After triggering an automation or running a script, check the result with ha_traces.
+- Ask the person before deleting anything, restarting Home Assistant or replacing a dashboard.`
+
+func (s *Server) instructions() string {
+	if s.readOnly {
+		return readInstructions
+	}
+	return readInstructions + writeInstructions
 }
 
 // text returns a tool result as one text block. Every tool answers this way:
