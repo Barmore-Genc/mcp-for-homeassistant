@@ -2121,6 +2121,9 @@ func organizeParseConfig(req *mcp.CallToolRequest, v any) (json.RawMessage, erro
 		if err := yaml.Unmarshal([]byte(c), &n); err != nil {
 			return nil, fmt.Errorf("config is not valid YAML or JSON: %w", err)
 		}
+		if err := configYAMLTags(&n); err != nil {
+			return nil, err
+		}
 		if len(n.Content) == 0 || n.Content[0].Kind != yaml.MappingNode {
 			return nil, errors.New("config must be a mapping with a top-level views list")
 		}
@@ -2133,6 +2136,16 @@ func organizeParseConfig(req *mcp.CallToolRequest, v any) (json.RawMessage, erro
 		return nil, errors.New("config is required")
 	}
 	return nil, fmt.Errorf("config must be YAML or JSON text or an object, got %T", v)
+}
+
+// configYAMLTags rejects tags such as !secret and !include in a config the
+// agent wrote. The config reaches HA as JSON, where a tag would silently turn
+// into its plain value instead of doing what the author meant.
+func configYAMLTags(n *yaml.Node) error {
+	if err := homeassistant.CheckYAMLTags(n); err != nil {
+		return fmt.Errorf("%w; configs saved through the API cannot use YAML tags such as !secret, !include or !input", err)
+	}
+	return nil
 }
 
 // organizeNodeJSON writes a YAML node tree as JSON, keeping mapping order.

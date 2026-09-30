@@ -1679,8 +1679,15 @@ func automationParseValue(v any) (any, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, fmt.Errorf("the config text is empty")
 	}
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(s), &n); err != nil {
+		return nil, fmt.Errorf("could not parse as YAML or JSON: %w", err)
+	}
+	if err := configYAMLTags(&n); err != nil {
+		return nil, err
+	}
 	var out any
-	if err := yaml.Unmarshal([]byte(s), &out); err != nil {
+	if err := n.Decode(&out); err != nil {
 		return nil, fmt.Errorf("could not parse as YAML or JSON: %w", err)
 	}
 	return automationNormalize(out), nil

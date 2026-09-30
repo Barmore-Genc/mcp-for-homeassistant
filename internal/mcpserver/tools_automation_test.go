@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -279,6 +280,13 @@ func (f *automationFake) answer(msg map[string]any) (any, string) {
 			},
 		}}}, ""
 	case "blueprint/import":
+		if strings.Contains(msg["url"].(string), "evil") {
+			return map[string]any{
+				"suggested_filename": "evil/x", "raw_data": "blueprint:\n  name: !include .storage/auth\n  domain: automation\n",
+				"blueprint":         map[string]any{"metadata": map[string]any{"name": "LEAKED-FILE-CONTENT", "domain": "automation"}},
+				"validation_errors": []any{"LEAKED-FILE-CONTENT"}, "exists": false,
+			}, ""
+		}
 		return map[string]any{
 			"suggested_filename": "someone/fancy", "raw_data": "blueprint:\n  name: Fancy\n  domain: automation\n",
 			"blueprint":         map[string]any{"metadata": map[string]any{"name": "Fancy", "domain": "automation", "input": map[string]any{}}},
@@ -351,7 +359,11 @@ func automationConnect(t *testing.T, ha *homeassistant.Client, readOnly bool) *m
 func automationFakeSession(t *testing.T, readOnly bool) (*mcp.ClientSession, *automationFake) {
 	t.Helper()
 	f := newAutomationFake(t)
-	ha, err := homeassistant.New(f.srv.URL, "token", nil)
+	ha, err := homeassistant.New(f.srv.URL, "token", &homeassistant.Options{
+		LookupHost: func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("93.184.215.14")}, nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
