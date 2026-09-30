@@ -1542,6 +1542,11 @@ type stateListenEventsInput struct {
 	MaxEvents int    `json:"max_events,omitempty" jsonschema:"stop after this many events, default 25, at most 200"`
 }
 
+// stateListenSlots bounds concurrent ha_listen_events calls. Each holds a
+// subscription on the one HA connection for up to two minutes, and that
+// connection allows 64 subscriptions in total, which the other tools also need.
+var stateListenSlots = make(chan struct{}, 8)
+
 func (s *Server) stateListenEvents(ctx context.Context, _ *mcp.CallToolRequest, in stateListenEventsInput) (*mcp.CallToolResult, any, error) {
 	secs := in.Seconds
 	if secs <= 0 {
@@ -1555,6 +1560,13 @@ func (s *Server) stateListenEvents(ctx context.Context, _ *mcp.CallToolRequest, 
 		maxEvents = 25
 	}
 	maxEvents = min(maxEvents, 200)
+
+	select {
+	case stateListenSlots <- struct{}{}:
+		defer func() { <-stateListenSlots }()
+	default:
+		return fail(fmt.Errorf("%d ha_listen_events calls are already running, which is the most at once; try again when one has finished", cap(stateListenSlots)))
+	}
 
 	// The subscription gets the request context rather than the listening
 	// window so that the window ending does not close it from another

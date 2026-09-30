@@ -187,7 +187,7 @@ Services and events:
 
 - `ha_list_services`: the services Home Assistant offers, with their fields and descriptions.
 - `ha_call_service` (*write*): call a service, such as `light.turn_on`.
-- `ha_listen_events`: listen on the event bus for a few seconds and return what fired.
+- `ha_listen_events`: listen on the event bus for a few seconds and return what fired. At most 8 listens run at once.
 - `ha_fire_event` (*write*): fire a custom event.
 
 Automations, scripts and scenes:

@@ -261,6 +261,41 @@ func TestWSCallContextCancel(t *testing.T) {
 	}
 }
 
+func TestWSCancelledWriteKeepsSharedConnection(t *testing.T) {
+	unblock := make(chan struct{})
+	h := newFakeHA(t, func(f *fakeConn, msg map[string]any) bool {
+		if msg["type"] == "test/block" {
+			<-unblock
+		}
+		f.result(int64(msg["id"].(float64)), nil)
+		return true
+	})
+	c := newTestClient(t, h.srv.URL, nil)
+	ctx := context.Background()
+	if _, err := c.ListAreas(ctx); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = c.wsCall(ctx, "test/block", nil, nil) }()
+	time.Sleep(50 * time.Millisecond)
+
+	// While the server is not reading, a large frame fills the socket buffers
+	// and the write is still in progress when the caller's deadline passes.
+	time.AfterFunc(300*time.Millisecond, func() { close(unblock) })
+	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	big := map[string]any{"pad": strings.Repeat("x", 900<<10)}
+	if err := c.wsCall(short, "test/big", big, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+
+	if _, err := c.ListAreas(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.conns.Load(); got != 1 {
+		t.Fatalf("a cancelled write reconnected the shared connection: %d connections", got)
+	}
+}
+
 func TestWSCoalescedMessages(t *testing.T) {
 	h := newFakeHA(t, func(f *fakeConn, msg map[string]any) bool {
 		id := int64(msg["id"].(float64))

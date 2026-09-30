@@ -14,7 +14,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-const maxPingTimeout = 10 * time.Second
+const (
+	maxPingTimeout = 10 * time.Second
+	wsWriteTimeout = 10 * time.Second
+)
 
 type wsMessage struct {
 	ID        int64           `json:"id"`
@@ -308,6 +311,9 @@ func (w *wsConn) callWithSub(ctx context.Context, typ string, payload any, sub *
 		return nil, err
 	}
 	msg, err := encodeCommand(id, typ, payload)
+	if err == nil && ctx.Err() != nil {
+		err = fmt.Errorf("homeassistant: %s: %w", typ, ctx.Err())
+	}
 	if err != nil {
 		w.writeMu.Unlock()
 		w.forget(id)
@@ -316,15 +322,16 @@ func (w *wsConn) callWithSub(ctx context.Context, typ string, payload any, sub *
 		}
 		return nil, err
 	}
-	err = w.conn.Write(ctx, websocket.MessageText, msg)
+	// The write gets the connection's context rather than the caller's: an
+	// interrupted write leaves the frame stream in an unknown state and closes
+	// the connection, which every session shares, so one cancelled request
+	// must not be able to do that.
+	wctx, cancel := context.WithTimeout(w.ctx, wsWriteTimeout)
+	err = w.conn.Write(wctx, websocket.MessageText, msg)
+	cancel()
 	w.writeMu.Unlock()
 	if err != nil {
-		// A failed or interrupted write leaves the frame stream in an unknown
-		// state, so the connection cannot be reused.
 		w.close(fmt.Errorf("%w: write: %v", ErrConnectionClosed, err))
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("homeassistant: %s: %w", typ, ctx.Err())
-		}
 		return nil, fmt.Errorf("homeassistant: %s: %w", typ, ErrConnectionClosed)
 	}
 

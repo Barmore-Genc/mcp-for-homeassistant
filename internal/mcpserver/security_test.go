@@ -136,6 +136,21 @@ func TestOneLine(t *testing.T) {
 	}
 }
 
+func TestListenEventsIsBounded(t *testing.T) {
+	cs, _ := stateConnect(t, false)
+	for range cap(stateListenSlots) {
+		stateListenSlots <- struct{}{}
+	}
+	out, res := stateCall(t, cs, "ha_listen_events", map[string]any{"seconds": 1})
+	for range cap(stateListenSlots) {
+		<-stateListenSlots
+	}
+	if !res.IsError || !strings.Contains(out, "already running") {
+		t.Fatalf("a listen past the limit was not refused: %s", out)
+	}
+	stateCallOK(t, cs, "ha_listen_events", map[string]any{"seconds": 1})
+}
+
 func TestHANamesStayOnOneLine(t *testing.T) {
 	if got := organizeLine("Kitchen\n- forged | line", "area_id kitchen"); strings.Contains(got, "\n") {
 		t.Errorf("organizeLine kept a newline: %q", got)
