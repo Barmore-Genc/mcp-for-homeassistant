@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +115,9 @@ func newStateFakeHA(t *testing.T) *stateFakeHA {
 				"add_item":  map[string]any{"fields": map[string]any{"item": map[string]any{"required": true, "example": "Milk", "selector": map[string]any{"text": map[string]any{}}}}},
 			}},
 		})
+	})
+	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"language": "de", "time_zone": "UTC", "version": "2026.9.4"})
 	})
 	mux.HandleFunc("POST /api/template", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "token is "+stateCamToken)
@@ -261,6 +265,15 @@ func (f *stateFakeHA) serveWS(t *testing.T, w http.ResponseWriter, r *http.Reque
 			result(map[string]any{"context": map[string]any{"id": "ctx123"}})
 		case "person/list":
 			result(map[string]any{"storage": []any{}, "config": []any{}})
+		case "frontend/get_translations":
+			b, _ := json.Marshal(msg["integration"])
+			f.record(fmt.Sprintf("translations %v %v %s", msg["language"], msg["category"], b))
+			result(map[string]any{"resources": map[string]any{
+				"component.light.services.turn_on.name":                              "Einschalten",
+				"component.light.services.turn_on.description":                       "Schaltet Lampen ein.",
+				"component.light.services.turn_on.fields.brightness_pct.description": "Helligkeit in Prozent.",
+				"component.light.services.turn_on.fields.flash.description":          "Blinken lassen.",
+			}})
 		default:
 			send(map[string]any{"id": id, "type": "result", "success": false, "error": map[string]any{"code": "unknown_command", "message": typ}})
 		}
@@ -463,7 +476,7 @@ func TestStateListServices(t *testing.T) {
 	}
 	out = stateCallOK(t, cs, "ha_list_services", map[string]any{"domain": "light.turn_on,todo"})
 	for _, want := range []string{
-		"light.turn_on | target: entity (light)", "brightness_pct: number 0–100 %", "flash: one of long|short",
+		"light.turn_on (Einschalten) | target: entity (light)", "brightness_pct: number 0–100 %", "flash: one of long|short",
 		"todo.get_items | returns data: call with return_response:true", "item: required, text, e.g. Milk",
 	} {
 		if !strings.Contains(out, want) {
@@ -472,6 +485,34 @@ func TestStateListServices(t *testing.T) {
 	}
 	if strings.Contains(out, "turn_off") {
 		t.Errorf("domain.service did not narrow to one service: %s", out)
+	}
+}
+
+func TestStateListServicesTranslations(t *testing.T) {
+	cs, f := stateConnect(t, false)
+	out := stateCallOK(t, cs, "ha_list_services", map[string]any{"domain": "light.turn_on,light.turn_off,todo"})
+	for _, want := range []string{
+		"light.turn_on (Einschalten) | target: entity (light)\n  Schaltet Lampen ein.\n",
+		"brightness_pct: number 0–100 % | Helligkeit in Prozent.",
+		"flash: one of long|short | Blinken lassen.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if !f.called(`translations de services ["light","todo"]`) {
+		t.Errorf("translations were not requested for just the listed integrations in the home's language: %v", f.calls)
+	}
+
+	stateCallOK(t, cs, "ha_list_services", map[string]any{})
+	n := 0
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "translations") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the domain overview loaded translations it does not show")
 	}
 }
 

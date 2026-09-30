@@ -1,6 +1,7 @@
 package homeassistant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -32,43 +33,113 @@ func (k ConfigKind) validateID(id string) error {
 // scene (admin only). Only items defined in automations.yaml, scripts.yaml
 // and scenes.yaml (the UI-managed files) are available.
 func (c *Client) GetConfigItem(ctx context.Context, kind ConfigKind, id string) (map[string]any, error) {
-	if err := kind.validateID(id); err != nil {
+	raw, err := c.GetConfigItemRaw(ctx, kind, id)
+	if err != nil {
 		return nil, err
 	}
 	var out map[string]any
-	err := c.doJSON(ctx, restRequest{
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetConfigItemRaw is GetConfigItem without decoding, which keeps the key
+// order HA stored the item with.
+func (c *Client) GetConfigItemRaw(ctx context.Context, kind ConfigKind, id string) (json.RawMessage, error) {
+	if err := kind.validateID(id); err != nil {
+		return nil, err
+	}
+	var out json.RawMessage
+	if err := c.doJSON(ctx, restRequest{
 		method: http.MethodGet,
 		path:   []string{"api", "config", string(kind), "config", id},
-	}, &out)
-	return out, err
+	}, &out); err != nil {
+		return nil, err
+	}
+	if !isJSONObject(out) {
+		return nil, &Error{Op: "GET /api/config/" + string(kind) + "/config/" + id, Message: "response is not a JSON object"}
+	}
+	return out, nil
 }
 
 // SaveConfigItem creates or fully replaces an automation, script or scene
 // (admin only). HA validates the config, writes the YAML file and reloads the
 // item. Any "id" field in config is replaced by id.
 func (c *Client) SaveConfigItem(ctx context.Context, kind ConfigKind, id string, config map[string]any) error {
-	if err := kind.validateID(id); err != nil {
-		return err
-	}
 	if config == nil {
 		return invalidArg("config is required")
 	}
-	body := make(map[string]any, len(config)+1)
-	for k, v := range config {
-		body[k] = v
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return invalidArg("config cannot be encoded as JSON: %v", err)
+	}
+	return c.SaveConfigItemRaw(ctx, kind, id, raw)
+}
+
+// SaveConfigItemRaw is SaveConfigItem for a JSON object. HA writes the YAML
+// file with the keys in the order they are sent, below the few it puts first.
+func (c *Client) SaveConfigItemRaw(ctx context.Context, kind ConfigKind, id string, config json.RawMessage) error {
+	if err := kind.validateID(id); err != nil {
+		return err
+	}
+	if !isJSONObject(config) {
+		return invalidArg("config must be a JSON object")
 	}
 	// HA copies an "id" from the body over the URL key for id-based items,
 	// which would store the item under a different id than requested.
+	pin := id
 	if kind == KindScript {
-		delete(body, "id")
-	} else {
-		body["id"] = id
+		pin = ""
+	}
+	body, err := withTopLevelID(config, pin)
+	if err != nil {
+		return invalidArg("config is not a valid JSON object: %v", err)
 	}
 	return c.doJSON(ctx, restRequest{
 		method: http.MethodPost,
 		path:   []string{"api", "config", string(kind), "config", id},
 		body:   body,
 	}, nil)
+}
+
+// withTopLevelID drops every top-level "id" key from obj and, if id is not
+// empty, puts "id": id first. The other keys keep their order.
+func withTopLevelID(obj json.RawMessage, id string) (json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(obj))
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	var b bytes.Buffer
+	b.WriteByte('{')
+	if id != "" {
+		k, _ := json.Marshal(id)
+		b.WriteString(`"id":`)
+		b.Write(k)
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := tok.(string)
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return nil, err
+		}
+		if key == "id" {
+			continue
+		}
+		if b.Len() > 1 {
+			b.WriteByte(',')
+		}
+		k, _ := json.Marshal(key)
+		b.Write(k)
+		b.WriteByte(':')
+		b.Write(val)
+	}
+	b.WriteByte('}')
+	return b.Bytes(), nil
 }
 
 // DeleteConfigItem deletes an automation, script or scene (admin only).

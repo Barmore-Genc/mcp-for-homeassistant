@@ -63,7 +63,8 @@ func (s *Server) addOrganizeTools(srv *mcp.Server) {
 		Annotations: readOnlyTool(),
 		Description: "Show the backups Home Assistant knows about (newest first, with date, size, storage " +
 			"locations and whether each is protected), when an automatic backup last ran and succeeded, when the " +
-			"next is due, and whether a backup is running now. Use it before risky changes to check there is a " +
+			"next is due, and whether a backup is running now. It also shows the automatic backup settings: whether " +
+			"they are set up, the schedule, how many backups are kept, what they contain and where they are stored. Use it before risky changes to check there is a " +
 			"recent backup, and after ha_create_backup to see the result.",
 	}, s.organizeBackupInfo)
 
@@ -1135,8 +1136,14 @@ func organizeYAML(raw []byte) (string, error) {
 
 func organizeBlockStyle(n *yaml.Node) {
 	n.Style = 0
-	if n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "\n") {
-		n.Style = yaml.LiteralStyle
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!str" {
+		if strings.Contains(n.Value, "\n") {
+			n.Style = yaml.LiteralStyle
+		} else {
+			// Encoding the value again quotes strings like "on" and "1:30"
+			// that YAML 1.1, which HA uses, would read as a bool or number.
+			_ = n.Encode(n.Value)
+		}
 	}
 	for _, c := range n.Content {
 		organizeBlockStyle(c)
@@ -1214,14 +1221,105 @@ func organizeBackupLine(bk homeassistant.Backup) string {
 }
 
 func (s *Server) organizeBackupInfo(ctx context.Context, _ *mcp.CallToolRequest, in organizeBackupInfoInput) (*mcp.CallToolResult, any, error) {
-	info, err := s.ha.BackupInfo(ctx)
+	var (
+		info *homeassistant.BackupInfo
+		cfg  *homeassistant.BackupConfig
+	)
+	err := stateAll(
+		func() (err error) { info, err = s.ha.BackupInfo(ctx); return },
+		// The settings add to the answer but are not needed for it.
+		func() error { cfg, _ = s.ha.BackupConfig(ctx); return nil },
+	)
 	if err != nil {
 		return fail(err)
 	}
-	return text(organizeRenderBackupInfo(info, in.Limit)), nil, nil
+	out := organizeRenderBackupInfo(info, in.Limit, cfg != nil)
+	if cfg != nil {
+		out = organizeRenderBackupConfig(cfg) + out
+	}
+	return text(out), nil, nil
 }
 
-func organizeRenderBackupInfo(info *homeassistant.BackupInfo, limit int) string {
+// organizeRenderBackupConfig describes the automatic backup settings. The
+// encryption password is never shown, only whether one is set.
+func organizeRenderBackupConfig(cfg *homeassistant.BackupConfig) string {
+	var b strings.Builder
+	if !cfg.AutomaticBackupsConfigured {
+		b.WriteString("Automatic backups are not set up; ha_create_backup needs them set up in Settings > System > Backups.\n")
+	}
+	sched := cfg.Schedule
+	switch sched.Recurrence {
+	case "never", "":
+		b.WriteString("Schedule: no automatic backups")
+	case "daily":
+		b.WriteString("Schedule: daily")
+	case "custom_days":
+		b.WriteString("Schedule: on " + strings.Join(sched.Days, ", "))
+	default:
+		b.WriteString("Schedule: " + sched.Recurrence)
+	}
+	if sched.Recurrence != "never" && sched.Recurrence != "" {
+		if sched.Time != nil && *sched.Time != "" {
+			b.WriteString(" at " + strings.TrimSuffix(*sched.Time, ":00"))
+		} else {
+			b.WriteString(" at a time Home Assistant picks")
+		}
+	}
+	b.WriteString(". Keep: " + organizeRetention(&cfg.Retention) + ".\n")
+
+	cb := cfg.CreateBackup
+	contents := []string{"Home Assistant settings"}
+	if cb.IncludeDatabase {
+		contents = append(contents, "history database")
+	}
+	contents = append(contents, cb.IncludeFolders...)
+	switch {
+	case cb.IncludeAllAddons:
+		contents = append(contents, "all add-ons")
+	case len(cb.IncludeAddons) > 0:
+		contents = append(contents, "add-ons "+strings.Join(cb.IncludeAddons, ", "))
+	}
+	enc := "not encrypted"
+	if cb.Encrypted {
+		enc = "encrypted with the stored key"
+	}
+	fmt.Fprintf(&b, "Automatic backups contain: %s; %s.\n", strings.Join(contents, " + "), enc)
+
+	if len(cb.AgentIDs) == 0 {
+		b.WriteString("Storage locations: none chosen.\n")
+	} else {
+		locs := make([]string, 0, len(cb.AgentIDs))
+		for _, id := range cb.AgentIDs {
+			var notes []string
+			if a, ok := cfg.Agents[id]; ok {
+				if !a.Protected && cb.Encrypted {
+					notes = append(notes, "unencrypted")
+				}
+				if a.Retention != nil {
+					notes = append(notes, "keeps "+organizeRetention(a.Retention))
+				}
+			}
+			if len(notes) > 0 {
+				id += " (" + strings.Join(notes, ", ") + ")"
+			}
+			locs = append(locs, id)
+		}
+		fmt.Fprintf(&b, "Storage locations: %s.\n", strings.Join(locs, ", "))
+	}
+	return b.String()
+}
+
+func organizeRetention(r *homeassistant.BackupRetention) string {
+	switch {
+	case r.Copies != nil:
+		return organizeCount(*r.Copies, "newest backup", "newest backups")
+	case r.Days != nil:
+		return fmt.Sprintf("backups from the last %s", organizeCount(*r.Days, "day", "days"))
+	}
+	return "all backups"
+}
+
+func organizeRenderBackupInfo(info *homeassistant.BackupInfo, limit int, settingsShown bool) string {
 	var b strings.Builder
 	state := info.State
 	if state == "" {
@@ -1235,7 +1333,7 @@ func organizeRenderBackupInfo(info *homeassistant.BackupInfo, limit int) string 
 		b.WriteString(", none scheduled")
 	}
 	b.WriteString(".\n")
-	if info.LastAttemptedAutomaticBackup == nil && info.LastCompletedAutomaticBackup == nil && info.NextAutomaticBackup == nil {
+	if !settingsShown && info.LastAttemptedAutomaticBackup == nil && info.LastCompletedAutomaticBackup == nil && info.NextAutomaticBackup == nil {
 		b.WriteString("Automatic backups look unconfigured; ha_create_backup needs them set up in Settings > System > Backups.\n")
 	}
 	if len(info.LastActionEvent) > 0 && string(info.LastActionEvent) != "null" {
@@ -2002,41 +2100,110 @@ type organizeSaveDashboardInput struct {
 	Confirm bool   `json:"confirm,omitempty" jsonschema:"required when the dashboard already has a stored config, which this replaces"`
 }
 
-func organizeParseConfig(v any) (map[string]any, error) {
+// organizeParseConfig returns the config as JSON with its keys in the order
+// they were written, because HA stores and shows the dashboard in that order.
+// An object argument is taken from the raw request arguments, since decoding
+// it into the input struct has already lost the order.
+func organizeParseConfig(req *mcp.CallToolRequest, v any) (json.RawMessage, error) {
 	switch c := v.(type) {
 	case map[string]any:
-		return c, nil
+		if req != nil && req.Params != nil {
+			var raw struct {
+				Config json.RawMessage `json:"config"`
+			}
+			if json.Unmarshal(req.Params.Arguments, &raw) == nil && len(raw.Config) > 0 && raw.Config[0] == '{' {
+				return raw.Config, nil
+			}
+		}
+		return json.Marshal(c)
 	case string:
-		var m map[string]any
-		if err := yaml.Unmarshal([]byte(c), &m); err != nil {
+		var n yaml.Node
+		if err := yaml.Unmarshal([]byte(c), &n); err != nil {
 			return nil, fmt.Errorf("config is not valid YAML or JSON: %w", err)
 		}
-		return m, nil
+		if len(n.Content) == 0 || n.Content[0].Kind != yaml.MappingNode {
+			return nil, errors.New("config must be a mapping with a top-level views list")
+		}
+		var b bytes.Buffer
+		if err := organizeNodeJSON(&b, n.Content[0]); err != nil {
+			return nil, fmt.Errorf("config cannot be sent as JSON: %w", err)
+		}
+		return b.Bytes(), nil
 	case nil:
 		return nil, errors.New("config is required")
 	}
 	return nil, fmt.Errorf("config must be YAML or JSON text or an object, got %T", v)
 }
 
-func (s *Server) organizeSaveDashboard(ctx context.Context, _ *mcp.CallToolRequest, in organizeSaveDashboardInput) (*mcp.CallToolResult, any, error) {
+// organizeNodeJSON writes a YAML node tree as JSON, keeping mapping order.
+func organizeNodeJSON(b *bytes.Buffer, n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.AliasNode:
+		return organizeNodeJSON(b, n.Alias)
+	case yaml.MappingNode:
+		b.WriteByte('{')
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.Kind != yaml.ScalarNode || k.Tag == "!!merge" {
+				return fmt.Errorf("line %d: only plain keys are supported", k.Line)
+			}
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			key, _ := json.Marshal(k.Value)
+			b.Write(key)
+			b.WriteByte(':')
+			if err := organizeNodeJSON(b, n.Content[i+1]); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	case yaml.SequenceNode:
+		b.WriteByte('[')
+		for i, c := range n.Content {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := organizeNodeJSON(b, c); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case yaml.ScalarNode:
+		var v any
+		if n.Tag == "!!timestamp" || n.Tag == "!!binary" {
+			v = n.Value
+		} else if err := n.Decode(&v); err != nil {
+			return fmt.Errorf("line %d: %w", n.Line, err)
+		}
+		out, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("line %d: %w", n.Line, err)
+		}
+		b.Write(out)
+	default:
+		return fmt.Errorf("line %d: unsupported YAML node", n.Line)
+	}
+	return nil
+}
+
+func (s *Server) organizeSaveDashboard(ctx context.Context, req *mcp.CallToolRequest, in organizeSaveDashboardInput) (*mcp.CallToolResult, any, error) {
 	if in.URLPath == "" {
 		return fail(errors.New("url_path is required; ha_get_dashboard lists them, 'lovelace' is the default dashboard"))
 	}
 	path := organizeDashboardPath(in.URLPath)
-	cfg, err := organizeParseConfig(in.Config)
+	body, err := organizeParseConfig(req, in.Config)
 	if err != nil {
 		return fail(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		return fail(fmt.Errorf("config must be a mapping with a top-level views list: %w", err))
 	}
 	_, hasViews := cfg["views"]
 	_, hasStrategy := cfg["strategy"]
 	if !hasViews && !hasStrategy {
 		return fail(errors.New("config needs a top-level views list (or a strategy); pass the whole dashboard, not one view or card"))
-	}
-	// Round-tripping through JSON catches YAML the API cannot carry, such as
-	// non-string map keys, before anything is overwritten.
-	body, err := json.Marshal(cfg)
-	if err != nil {
-		return fail(fmt.Errorf("config cannot be sent as JSON: %w", err))
 	}
 	dashboards, err := s.ha.ListDashboards(ctx)
 	if err != nil {
@@ -2056,14 +2223,11 @@ func (s *Server) organizeSaveDashboard(ctx context.Context, _ *mcp.CallToolReque
 		return fail(fmt.Errorf("dashboard %s already has a config and this replaces all of it. Make sure the new config is the "+
 			"whole dashboard (ha_get_dashboard returns the current one), then call again with confirm:true", path))
 	}
-	if err := s.ha.SaveDashboardConfig(ctx, path, cfg); err != nil {
+	if err := s.ha.SaveDashboardConfig(ctx, path, body); err != nil {
 		return fail(err)
 	}
-	var views struct {
-		Views []any `json:"views"`
-	}
-	_ = json.Unmarshal(body, &views)
-	out := fmt.Sprintf("Saved dashboard %s (%s).", path, organizeCount(len(views.Views), "view", "views"))
+	views, _ := cfg["views"].([]any)
+	out := fmt.Sprintf("Saved dashboard %s (%s).", path, organizeCount(len(views), "view", "views"))
 	if generated {
 		return text(out + " It was auto-generated before. To go back to the generated dashboard, the person can clear " +
 			"the config in the dashboard's raw configuration editor and save."), nil, nil
@@ -2120,7 +2284,7 @@ func (s *Server) organizeCreateBackup(ctx context.Context, _ *mcp.CallToolReques
 				return text("Backup finished: " + organizeBackupLine(b)), nil, nil
 			}
 		}
-		return text("The backup job " + job + " ended without a new backup appearing. " + organizeRenderBackupInfo(info, 3)), nil, nil
+		return text("The backup job " + job + " ended without a new backup appearing. " + organizeRenderBackupInfo(info, 3, false)), nil, nil
 	}
 	return text(fmt.Sprintf("Backup %s started and is still running after %s; check ha_backup_info for the result.", job, organizeBackupWait)), nil, nil
 }

@@ -256,6 +256,36 @@ func TestSaveConfigItemPinsID(t *testing.T) {
 	}
 }
 
+func TestWithTopLevelIDKeepsOrder(t *testing.T) {
+	got, err := withTopLevelID(json.RawMessage(`{"alias":"x","id":"other","triggers":[{"z":1,"id":2}],"mode":"single"}`), "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"id":"abc","alias":"x","triggers":[{"z":1,"id":2}],"mode":"single"}`; string(got) != want {
+		t.Fatalf("got %s", got)
+	}
+	got, _ = withTopLevelID(json.RawMessage(`{"id":"x","sequence":[]}`), "")
+	if string(got) != `{"sequence":[]}` {
+		t.Fatalf("got %s", got)
+	}
+	if err := (&Client{}).SaveConfigItemRaw(context.Background(), KindAutomation, "abc", json.RawMessage(`[1]`)); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("a non-object config was accepted: %v", err)
+	}
+}
+
+func TestBackupCreateSettingsDropsPassword(t *testing.T) {
+	var s BackupCreateSettings
+	if err := json.Unmarshal([]byte(`{"agent_ids":["backup.local"],"include_database":true,"password":"s3cret"}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Encrypted || !s.IncludeDatabase || len(s.AgentIDs) != 1 {
+		t.Fatalf("decoded %+v", s)
+	}
+	if b, _ := json.Marshal(s); strings.Contains(string(b), "s3cret") {
+		t.Fatalf("password kept: %s", b)
+	}
+}
+
 func TestErrorLogTail(t *testing.T) {
 	var gotRange string
 	body := strings.Repeat("old line\n", 1000) + "last line one\nlast line two\n"

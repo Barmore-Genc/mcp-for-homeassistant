@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -26,8 +27,11 @@ type automationFake struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	configs  map[string]map[string]map[string]any
+	mu      sync.Mutex
+	configs map[string]map[string]map[string]any
+	// raw is what GET returns for each config, so the key order HA keeps can
+	// be tested.
+	raw      map[string]map[string][]byte
 	extra    []map[string]any
 	services []string
 	ws       []map[string]any
@@ -35,16 +39,19 @@ type automationFake struct {
 
 func newAutomationFake(t *testing.T) *automationFake {
 	t.Helper()
-	f := &automationFake{t: t, configs: map[string]map[string]map[string]any{
-		"automation": {"1700000000001": {
-			"id": "1700000000001", "alias": "Porch light at sunset",
-			"triggers": []any{map[string]any{"trigger": "sun", "event": "sunset"}},
-			"actions":  []any{map[string]any{"action": "light.turn_on", "target": map[string]any{"entity_id": "light.porch"}}},
-			"mode":     "single",
-		}},
-		"script": {"morning": {"alias": "Morning", "sequence": []any{map[string]any{"delay": 1}}}},
-		"scene":  {"1700000000002": {"id": "1700000000002", "name": "Movie", "entities": map[string]any{"light.tv": "off"}}},
-	}}
+	f := &automationFake{t: t, configs: map[string]map[string]map[string]any{}, raw: map[string]map[string][]byte{}}
+	for kind, items := range map[string]map[string]string{
+		"automation": {"1700000000001": `{"id":"1700000000001","alias":"Porch light at sunset",` +
+			`"triggers":[{"trigger":"sun","event":"sunset"}],` +
+			`"actions":[{"action":"light.turn_on","target":{"entity_id":"light.porch"}}],"mode":"single"}`},
+		"script": {"morning": `{"alias":"Morning","sequence":[{"delay":1}]}`},
+		"scene":  {"1700000000002": `{"id":"1700000000002","name":"Movie","entities":{"light.tv":"off"}}`},
+	} {
+		f.configs[kind], f.raw[kind] = map[string]map[string]any{}, map[string][]byte{}
+		for id, js := range items {
+			f.store(kind, id, []byte(js))
+		}
+	}
 	// An automation defined in configuration.yaml: it has an id, but the
 	// config API does not know it.
 	f.extra = []map[string]any{
@@ -71,23 +78,26 @@ func newAutomationFake(t *testing.T) *automationFake {
 		kind, id := r.PathValue("kind"), r.PathValue("id")
 		switch r.Method {
 		case http.MethodGet:
-			if c, ok := f.configs[kind][id]; ok {
-				automationWriteJSON(w, c)
+			if raw, ok := f.raw[kind][id]; ok {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(raw)
 				return
 			}
 		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
 			var c map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&c)
+			_ = json.Unmarshal(body, &c)
 			if _, ok := c["entities"].(string); ok {
 				http.Error(w, `{"message":"Message malformed: expected dict at 'entities'"}`, http.StatusBadRequest)
 				return
 			}
-			f.configs[kind][id] = c
+			f.store(kind, id, body)
 			automationWriteJSON(w, map[string]any{"result": "ok"})
 			return
 		case http.MethodDelete:
 			if _, ok := f.configs[kind][id]; ok {
 				delete(f.configs[kind], id)
+				delete(f.raw[kind], id)
 				automationWriteJSON(w, map[string]any{"result": "ok"})
 				return
 			}
@@ -110,6 +120,15 @@ func newAutomationFake(t *testing.T) *automationFake {
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+func (f *automationFake) store(kind, id string, raw []byte) {
+	var c map[string]any
+	if err := json.Unmarshal(raw, &c); err != nil {
+		f.t.Fatalf("bad config JSON %s: %v", raw, err)
+	}
+	f.configs[kind][id] = c
+	f.raw[kind][id] = raw
 }
 
 func automationWriteJSON(w http.ResponseWriter, v any) {
@@ -525,6 +544,12 @@ func TestAutomationSaveValidatesDiffsAndCreates(t *testing.T) {
 	automationWant(t, out, "Updated automation.porch_light_at_sunset (id 1700000000001).", "Changes (- before, + after):", `+     offset: "-00:10:00"`)
 	if strings.Contains(out, "- alias") {
 		t.Errorf("unchanged lines reported as removed:\n%s", out)
+	}
+	f.mu.Lock()
+	stored := string(f.raw["automation"]["1700000000001"])
+	f.mu.Unlock()
+	if want := `{"id":"1700000000001","alias":"Porch light at sunset","triggers":[{"trigger":"sun","event":"sunset","offset":"-00:10:00"}],`; !strings.HasPrefix(stored, want) {
+		t.Errorf("the save did not keep the written key order with the id first:\n%s", stored)
 	}
 
 	out = automationMustCall(t, cs, "ha_manage_automation", map[string]any{

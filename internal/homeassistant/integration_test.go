@@ -3,6 +3,7 @@
 package homeassistant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -564,7 +565,7 @@ func TestIntegrationMisc(t *testing.T) {
 		t.Logf("default dashboard before save: %v", err)
 	}
 	dash := map[string]any{"title": "MCP", "views": []any{map[string]any{"title": "Home", "cards": []any{map[string]any{"type": "entities", "entities": []string{"light.kitchen_lights"}}}}}}
-	ok(t, c.SaveDashboardConfig(ctx, "", dash))
+	ok(t, c.SaveDashboardConfig(ctx, "", must(json.Marshal(dash))(t)))
 	raw := must(c.GetDashboardConfig(ctx, ""))(t)
 	if !strings.Contains(string(raw), "light.kitchen_lights") {
 		t.Fatalf("dashboard config %s", raw)
@@ -708,6 +709,39 @@ func TestIntegrationZRestart(t *testing.T) {
 	c.wsMu.Unlock()
 	if after == before {
 		t.Fatal("expected a new WebSocket connection after restart")
+	}
+}
+
+func TestIntegrationTranslationsBackupConfigKeyOrder(t *testing.T) {
+	c := integrationClient(t)
+	ctx := ctxT(t)
+
+	tr := must(c.GetTranslations(ctx, "en", "services", "light"))(t)
+	if tr["component.light.services.turn_on.fields.brightness_pct.description"] == "" {
+		t.Fatalf("no light.turn_on field description in %d strings", len(tr))
+	}
+	for k := range tr {
+		if !strings.HasPrefix(k, "component.light.") {
+			t.Fatalf("the integration filter was ignored: %s", k)
+		}
+	}
+
+	bc := must(c.BackupConfig(ctx))(t)
+	if bc.Schedule.Recurrence == "" {
+		t.Fatalf("backup config without a schedule: %+v", bc)
+	}
+
+	id := "mcp_fu_" + suffix()
+	t.Cleanup(func() { _ = c.DeleteConfigItem(context.Background(), KindAutomation, id) })
+	body := `{"alias":"MCP FU ` + id + `","triggers":[{"trigger":"event","event_type":"mcp_fu_event","event_data":{"z":1,"a":2}}],` +
+		`"actions":[],"mode":"single","id":"not_this_one"}`
+	ok(t, c.SaveConfigItemRaw(ctx, KindAutomation, id, json.RawMessage(body)))
+	raw := must(c.GetConfigItemRaw(ctx, KindAutomation, id))(t)
+	want := `{"id":"` + id + `","alias":"MCP FU ` + id + `","triggers":[{"trigger":"event","event_type":"mcp_fu_event","event_data":{"z":1,"a":2}}]`
+	var compact bytes.Buffer
+	ok(t, json.Compact(&compact, raw))
+	if !strings.HasPrefix(compact.String(), want) {
+		t.Fatalf("stored key order lost:\n%s", raw)
 	}
 }
 

@@ -173,9 +173,10 @@ func (c *Client) GetDashboardConfig(ctx context.Context, urlPath string) (json.R
 }
 
 // SaveDashboardConfig replaces a storage-mode dashboard's config (admin only).
-func (c *Client) SaveDashboardConfig(ctx context.Context, urlPath string, config map[string]any) error {
-	if config == nil {
-		return invalidArg("config is required")
+// The config is sent as given, so HA stores its keys in the caller's order.
+func (c *Client) SaveDashboardConfig(ctx context.Context, urlPath string, config json.RawMessage) error {
+	if !isJSONObject(config) {
+		return invalidArg("config must be a JSON object")
 	}
 	p, err := dashboardPayload(urlPath)
 	if err != nil {

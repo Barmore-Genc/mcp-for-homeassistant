@@ -15,7 +15,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const organizeTestToken = "organize-test-token"
+const (
+	organizeTestToken      = "organize-test-token"
+	organizeBackupPassword = "backup-key-7Qx2"
+)
 
 // organizeFake is a Home Assistant that answers the WebSocket commands and
 // REST calls the organize tools make with canned data, and records what it was
@@ -24,6 +27,7 @@ type organizeFake struct {
 	t        *testing.T
 	mu       sync.Mutex
 	received []map[string]any
+	frames   []string
 	rest     []string
 	ws       map[string]func(msg map[string]any) (any, string)
 }
@@ -142,6 +146,21 @@ func newOrganizeFake(t *testing.T) *organizeFake {
 				"next_automatic_backup": "2026-09-30T03:00:00+00:00", "state": "idle",
 			}, ""
 		},
+		"backup/config/info": func(map[string]any) (any, string) {
+			return map[string]any{"config": map[string]any{
+				"agents": map[string]any{
+					"backup.local": map[string]any{"protected": true, "retention": nil},
+					"cloud.cloud":  map[string]any{"protected": false, "retention": map[string]any{"copies": 2, "days": nil}},
+				},
+				"automatic_backups_configured": true,
+				"create_backup": map[string]any{"agent_ids": []any{"backup.local", "cloud.cloud"}, "include_addons": nil, "include_all_addons": false,
+					"include_database": true, "include_folders": []any{"media"}, "name": nil, "password": organizeBackupPassword},
+				"retention":                       map[string]any{"copies": 3, "days": nil},
+				"schedule":                        map[string]any{"recurrence": "custom_days", "days": []any{"mon", "thu"}, "time": "04:45:00"},
+				"last_attempted_automatic_backup": nil, "last_completed_automatic_backup": nil,
+				"next_automatic_backup": "2026-10-01T04:45:00+00:00", "next_automatic_backup_additional": false,
+			}}, ""
+		},
 		"backup/generate_with_automatic_settings": func(map[string]any) (any, string) {
 			return nil, "home_assistant_error"
 		},
@@ -201,6 +220,7 @@ func (f *organizeFake) serve() *httptest.Server {
 			}
 			f.mu.Lock()
 			f.received = append(f.received, msg)
+			f.frames = append(f.frames, string(data))
 			h := f.ws[typ]
 			f.mu.Unlock()
 			if h == nil {
@@ -521,13 +541,57 @@ func TestOrganizeSaveDashboard(t *testing.T) {
 	organizeWants(t, out, "Saved dashboard fresh-dash (0 views).", "auto-generated")
 }
 
+func TestOrganizeSaveDashboardKeepsKeyOrder(t *testing.T) {
+	f := newOrganizeFake(t)
+	cs := organizeConnect(t, f, false)
+	organizeOK(t, cs, "ha_save_dashboard", map[string]any{"url_path": "fresh-dash",
+		"config": "views:\n  - title: New\n    path: new\n    cards:\n      - type: tile\n        entity: light.a\ntitle: Zed\n"})
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "ha_save_dashboard", Arguments: json.RawMessage(
+		`{"url_path":"fresh-dash","config":{"views":[{"type":"sections","title":"B","cards":[]}],"title":"A"}}`)})
+	if err != nil || res.IsError {
+		t.Fatalf("save with an object config failed: %v %v", err, res)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var saves []string
+	for _, fr := range f.frames {
+		if strings.Contains(fr, `"lovelace/config/save"`) {
+			saves = append(saves, fr)
+		}
+	}
+	for i, want := range []string{
+		`"config":{"views":[{"title":"New","path":"new","cards":[{"type":"tile","entity":"light.a"}]}],"title":"Zed"}`,
+		`"config":{"views":[{"type":"sections","title":"B","cards":[]}],"title":"A"}`,
+	} {
+		if i >= len(saves) || !strings.Contains(saves[i], want) {
+			t.Errorf("save %d did not keep the key order; want %s in %v", i, want, saves)
+		}
+	}
+}
+
 func TestOrganizeBackupInfo(t *testing.T) {
 	out := organizeOK(t, organizeConnect(t, newOrganizeFake(t), false), "ha_backup_info", map[string]any{})
 	organizeWants(t, out,
 		"Automatic backups: last attempted 2026-09-29 03:00 UTC, last completed 2026-09-29 03:05 UTC, next 2026-09-30 03:00 UTC.",
 		"2 backups, newest first:\n2026-09-29 03:00 UTC | Automatic backup",
 		"FAILED to upload to cloud.cloud",
-		"2026-09-01 03:00 UTC | Before upgrade | 50.0 MB | in backup.local (encrypted) | Home Assistant 2026.8.0 + database | backup_id old1")
+		"2026-09-01 03:00 UTC | Before upgrade | 50.0 MB | in backup.local (encrypted) | Home Assistant 2026.8.0 + database | backup_id old1",
+		"Schedule: on mon, thu at 04:45. Keep: 3 newest backups.",
+		"Automatic backups contain: Home Assistant settings + history database + media; encrypted with the stored key.",
+		"Storage locations: backup.local, cloud.cloud (unencrypted, keeps 2 newest backups).")
+	if strings.Contains(out, organizeBackupPassword) || strings.Contains(out, "not set up") {
+		t.Errorf("backup info leaks the password or misreports the setup:\n%s", out)
+	}
+}
+
+func TestOrganizeBackupInfoWithoutSettings(t *testing.T) {
+	f := newOrganizeFake(t)
+	f.ws["backup/config/info"] = func(map[string]any) (any, string) {
+		return map[string]any{"config": map[string]any{"automatic_backups_configured": false,
+			"schedule": map[string]any{"recurrence": "never", "days": []any{}, "time": nil}, "retention": map[string]any{}}}, ""
+	}
+	out := organizeOK(t, organizeConnect(t, f, false), "ha_backup_info", map[string]any{})
+	organizeWants(t, out, "Automatic backups are not set up", "Schedule: no automatic backups. Keep: all backups.", "Storage locations: none chosen.")
 }
 
 func TestOrganizeCreateBackupExplainsMissingSettings(t *testing.T) {

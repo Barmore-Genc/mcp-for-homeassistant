@@ -1,6 +1,8 @@
 package homeassistant
 
 import (
+	"bytes"
+	"encoding/json"
 	"net"
 	"net/url"
 	"regexp"
@@ -112,6 +114,11 @@ func validateBlueprintURL(raw string) error {
 		return invalidArg("blueprint URL must use the default https port")
 	}
 	return nil
+}
+
+func isJSONObject(b []byte) bool {
+	t := bytes.TrimLeft(b, " \t\r\n")
+	return len(t) > 0 && t[0] == '{' && json.Valid(t)
 }
 
 // rejectReservedKeys stops caller-supplied maps from overriding the WebSocket

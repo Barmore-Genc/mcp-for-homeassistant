@@ -273,7 +273,7 @@ func (s *Server) automationGet(ctx context.Context, _ *mcp.CallToolRequest, in a
 	if err := it.requireConfigID(); err != nil {
 		return fail(err)
 	}
-	cfg, err := s.ha.GetConfigItem(ctx, it.kind, it.configID)
+	cfg, err := s.ha.GetConfigItemRaw(ctx, it.kind, it.configID)
 	if homeassistant.IsNotFound(err) {
 		if it.entityID == "" {
 			return fail(fmt.Errorf("no %s has the id %q", it.kind, it.configID))
@@ -291,7 +291,7 @@ func (s *Server) automationGet(ctx context.Context, _ *mcp.CallToolRequest, in a
 		b.WriteString(": no entity is loaded for it")
 	}
 	b.WriteString("\n")
-	b.WriteString(automationYAML(cfg))
+	b.WriteString(automationRawYAML(cfg))
 	return text(b.String()), nil, nil
 }
 
@@ -1251,7 +1251,7 @@ type automationManageInput struct {
 	Confirm       bool           `json:"confirm,omitempty" jsonschema:"required for delete"`
 }
 
-func (s *Server) automationManage(ctx context.Context, _ *mcp.CallToolRequest, in automationManageInput) (*mcp.CallToolResult, any, error) {
+func (s *Server) automationManage(ctx context.Context, req *mcp.CallToolRequest, in automationManageInput) (*mcp.CallToolResult, any, error) {
 	kind, err := automationParseKind(in.Kind)
 	if err != nil {
 		return fail(err)
@@ -1259,7 +1259,7 @@ func (s *Server) automationManage(ctx context.Context, _ *mcp.CallToolRequest, i
 	action := strings.ToLower(strings.TrimSpace(in.Action))
 	switch action {
 	case "save":
-		return s.automationSave(ctx, kind, in)
+		return s.automationSave(ctx, req, kind, in)
 	case "delete":
 		return s.automationDelete(ctx, kind, in)
 	case "enable", "disable", "trigger", "run", "activate":
@@ -1275,11 +1275,11 @@ func automationSlug(s string) string {
 	return strings.Trim(automationSlugRe.ReplaceAllString(strings.ToLower(s), "_"), "_")
 }
 
-func (s *Server) automationSave(ctx context.Context, kind homeassistant.ConfigKind, in automationManageInput) (*mcp.CallToolResult, any, error) {
+func (s *Server) automationSave(ctx context.Context, req *mcp.CallToolRequest, kind homeassistant.ConfigKind, in automationManageInput) (*mcp.CallToolResult, any, error) {
 	if in.Config == nil {
 		return fail(fmt.Errorf("config is required to save"))
 	}
-	cfg, err := automationParseConfig(in.Config)
+	body, cfg, err := automationConfigJSON(req, in.Config)
 	if err != nil {
 		return fail(err)
 	}
@@ -1333,7 +1333,7 @@ func (s *Server) automationSave(ctx context.Context, kind homeassistant.ConfigKi
 		}
 	}
 
-	prev, err := s.ha.GetConfigItem(ctx, it.kind, it.configID)
+	prev, err := s.ha.GetConfigItemRaw(ctx, it.kind, it.configID)
 	if homeassistant.IsNotFound(err) {
 		if it.entityID != "" {
 			return fail(automationNotUIManaged(it))
@@ -1349,7 +1349,7 @@ func (s *Server) automationSave(ctx context.Context, kind homeassistant.ConfigKi
 		}
 	}
 
-	if err := s.ha.SaveConfigItem(ctx, it.kind, it.configID, cfg); err != nil {
+	if err := s.ha.SaveConfigItemRaw(ctx, it.kind, it.configID, body); err != nil {
 		return fail(fmt.Errorf("%w\nNothing was saved", err))
 	}
 
@@ -1366,11 +1366,11 @@ func (s *Server) automationSave(ctx context.Context, kind homeassistant.ConfigKi
 		b.WriteString(" HA stored it but has not loaded an entity for it; check the log for errors.")
 	}
 	if prev != nil {
-		after, err := s.ha.GetConfigItem(ctx, it.kind, it.configID)
+		after, err := s.ha.GetConfigItemRaw(ctx, it.kind, it.configID)
 		if err != nil {
-			after = cfg
+			after = body
 		}
-		diff := automationDiff(automationYAML(prev), automationYAML(after))
+		diff := automationDiff(automationRawYAML(prev), automationRawYAML(after))
 		if diff == "" {
 			b.WriteString("\nThe stored config did not change.")
 		} else {
@@ -1416,7 +1416,7 @@ func (s *Server) automationDelete(ctx context.Context, kind homeassistant.Config
 	if err := it.requireConfigID(); err != nil {
 		return fail(err)
 	}
-	cfg, err := s.ha.GetConfigItem(ctx, it.kind, it.configID)
+	cfg, err := s.ha.GetConfigItemRaw(ctx, it.kind, it.configID)
 	if homeassistant.IsNotFound(err) {
 		if it.entityID == "" {
 			return fail(fmt.Errorf("no %s has the id %q", it.kind, it.configID))
@@ -1433,7 +1433,7 @@ func (s *Server) automationDelete(ctx context.Context, kind homeassistant.Config
 	if err := s.ha.DeleteConfigItem(ctx, it.kind, it.configID); err != nil {
 		return fail(err)
 	}
-	return text(fmt.Sprintf("Deleted %s. Its config was:\n%s", it.label(), automationYAML(cfg))), nil, nil
+	return text(fmt.Sprintf("Deleted %s. Its config was:\n%s", it.label(), automationRawYAML(cfg))), nil, nil
 }
 
 func (s *Server) automationControl(ctx context.Context, kind homeassistant.ConfigKind, action string, in automationManageInput) (*mcp.CallToolResult, any, error) {
@@ -1650,6 +1650,27 @@ func automationParseConfig(v any) (map[string]any, error) {
 	return m, nil
 }
 
+// automationConfigJSON returns a save's config as JSON in the key order it
+// was written, which HA keeps in the YAML file, and decoded for inspection.
+func automationConfigJSON(req *mcp.CallToolRequest, v any) (json.RawMessage, map[string]any, error) {
+	cfg, err := automationParseConfig(v)
+	if err != nil {
+		return nil, nil, err
+	}
+	body, err := organizeParseConfig(req, v)
+	if err != nil {
+		if body, err = json.Marshal(cfg); err != nil {
+			return nil, nil, fmt.Errorf("config cannot be sent as JSON: %w", err)
+		}
+		return body, cfg, nil
+	}
+	var ordered map[string]any
+	if err := json.Unmarshal(body, &ordered); err != nil {
+		return nil, nil, fmt.Errorf("config cannot be sent as JSON: %w", err)
+	}
+	return body, ordered, nil
+}
+
 func automationParseValue(v any) (any, error) {
 	s, ok := v.(string)
 	if !ok {
@@ -1780,6 +1801,17 @@ func automationYAML(v any) string {
 	}
 	_ = enc.Close()
 	return b.String()
+}
+
+// automationRawYAML renders a stored config in the key order HA keeps it in,
+// which is the order the person or the HA editor wrote it.
+func automationRawYAML(raw json.RawMessage) string {
+	if y, err := organizeYAML(raw); err == nil {
+		return y
+	}
+	var v any
+	_ = json.Unmarshal(raw, &v)
+	return automationYAML(v)
 }
 
 func automationFlowYAML(v any) string {

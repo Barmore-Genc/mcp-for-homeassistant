@@ -163,6 +163,82 @@ func (c *Client) BackupInfo(ctx context.Context) (*BackupInfo, error) {
 	return &out, nil
 }
 
+// BackupConfig is the automatic backup setup from Settings > System > Backups.
+// The encryption password is never decoded into it.
+type BackupConfig struct {
+	// AutomaticBackupsConfigured is false until the automatic backup setup
+	// has been completed in the UI.
+	AutomaticBackupsConfigured    bool                         `json:"automatic_backups_configured"`
+	Agents                        map[string]BackupAgentConfig `json:"agents"`
+	CreateBackup                  BackupCreateSettings         `json:"create_backup"`
+	Retention                     BackupRetention              `json:"retention"`
+	Schedule                      BackupSchedule               `json:"schedule"`
+	LastAttemptedAutomaticBackup  *string                      `json:"last_attempted_automatic_backup"`
+	LastCompletedAutomaticBackup  *string                      `json:"last_completed_automatic_backup"`
+	NextAutomaticBackup           *string                      `json:"next_automatic_backup"`
+	NextAutomaticBackupAdditional bool                         `json:"next_automatic_backup_additional"`
+}
+
+// BackupAgentConfig holds the settings of one storage location. A nil
+// Retention means the location follows the global retention.
+type BackupAgentConfig struct {
+	Protected bool             `json:"protected"`
+	Retention *BackupRetention `json:"retention"`
+}
+
+// BackupCreateSettings is what an automatic backup includes and where it goes.
+type BackupCreateSettings struct {
+	AgentIDs         []string `json:"agent_ids"`
+	IncludeAddons    []string `json:"include_addons"`
+	IncludeAllAddons bool     `json:"include_all_addons"`
+	IncludeDatabase  bool     `json:"include_database"`
+	IncludeFolders   []string `json:"include_folders"`
+	Name             *string  `json:"name"`
+	// Encrypted reports whether an encryption password is set.
+	Encrypted bool `json:"-"`
+}
+
+func (s *BackupCreateSettings) UnmarshalJSON(b []byte) error {
+	type plain BackupCreateSettings
+	var v struct {
+		plain
+		Password *string `json:"password"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*s = BackupCreateSettings(v.plain)
+	s.Encrypted = v.Password != nil && *v.Password != ""
+	return nil
+}
+
+// BackupRetention keeps the newest Copies backups or those younger than Days.
+// Both nil keeps backups forever.
+type BackupRetention struct {
+	Copies *int `json:"copies"`
+	Days   *int `json:"days"`
+}
+
+// BackupSchedule is when automatic backups run. Recurrence is "never",
+// "daily" or "custom_days", the last on Days such as "mon". A nil Time lets
+// HA pick a time in its default window.
+type BackupSchedule struct {
+	Recurrence string   `json:"recurrence"`
+	Days       []string `json:"days"`
+	Time       *string  `json:"time"`
+}
+
+// BackupConfig returns the automatic backup settings (admin only).
+func (c *Client) BackupConfig(ctx context.Context) (*BackupConfig, error) {
+	var out struct {
+		Config BackupConfig `json:"config"`
+	}
+	if err := c.wsCall(ctx, "backup/config/info", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Config, nil
+}
+
 // BackupDetails returns one backup; Backup is nil if it does not exist.
 func (c *Client) BackupDetails(ctx context.Context, backupID string) (*Backup, map[string]string, error) {
 	if err := validateRegistryID("backup", backupID); err != nil {

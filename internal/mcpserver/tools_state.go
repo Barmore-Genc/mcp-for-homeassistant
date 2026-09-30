@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/homeassistant"
@@ -351,11 +352,27 @@ func (s *Server) stateRange(start, end string, def time.Duration) (time.Time, ti
 	return st, e, nil
 }
 
-// stateAll runs the calls one after another. Concurrent WebSocket commands
-// can reach HA with message ids out of order, which it rejects with id_reuse.
+// stateAllLimit caps the calls in flight so ha_get_state with 50 entities
+// does not open 50 connections to HA at once.
+const stateAllLimit = 8
+
+// stateAll runs the calls concurrently and returns the first error in
+// argument order.
 func stateAll(fns ...func() error) error {
-	for _, f := range fns {
-		if err := f(); err != nil {
+	errs := make([]error, len(fns))
+	sem := make(chan struct{}, stateAllLimit)
+	var wg sync.WaitGroup
+	for i, f := range fns {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			errs[i] = f()
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
 			return err
 		}
 	}
@@ -758,14 +775,46 @@ type stateServiceField struct {
 	Fields      map[string]json.RawMessage `json:"fields"`
 }
 
+// stateServiceTexts holds the "services" translations. HA no longer puts
+// service and field descriptions in the service list; the frontend reads
+// them from the translations, in the language the home is set to.
+type stateServiceTexts map[string]string
+
+func (t stateServiceTexts) get(domain, service string, key ...string) string {
+	return t["component."+domain+".services."+service+"."+strings.Join(key, ".")]
+}
+
 func (s *Server) stateListServices(ctx context.Context, _ *mcp.CallToolRequest, in stateListServicesInput) (*mcp.CallToolResult, any, error) {
-	all, err := s.ha.ListServices(ctx)
-	if err != nil {
+	wanted := stateStrings([]string{in.Domain})
+	var (
+		all   []homeassistant.ServiceDomain
+		texts stateServiceTexts
+	)
+	fns := []func() error{func() (err error) { all, err = s.ha.ListServices(ctx); return }}
+	if len(wanted) > 0 {
+		var domains []string
+		for _, w := range wanted {
+			d, _, _ := strings.Cut(w, ".")
+			if !slices.Contains(domains, d) {
+				domains = append(domains, d)
+			}
+		}
+		// Descriptions only make the answer better, so a failure to load them
+		// is not an error.
+		fns = append(fns, func() error {
+			lang := "en"
+			if cfg, err := s.ha.GetConfig(ctx); err == nil && cfg.Language != "" {
+				lang = cfg.Language
+			}
+			texts, _ = s.ha.GetTranslations(ctx, lang, "services", domains...)
+			return nil
+		})
+	}
+	if err := stateAll(fns...); err != nil {
 		return fail(err)
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Domain < all[j].Domain })
 
-	wanted := stateStrings([]string{in.Domain})
 	if len(wanted) == 0 {
 		var b strings.Builder
 		fmt.Fprintf(&b, "%d domains. Call again with a domain for the fields of its services.\n", len(all))
@@ -788,7 +837,7 @@ func (s *Server) stateListServices(ctx context.Context, _ *mcp.CallToolRequest, 
 			if service != "" && name != service {
 				continue
 			}
-			stateWriteService(&b, d.Domain, name, d.Services[name])
+			stateWriteService(&b, d.Domain, name, d.Services[name], texts)
 		}
 		if service != "" {
 			if _, ok := d.Services[service]; !ok {
@@ -808,8 +857,14 @@ func stateSortedKeys[T any](m map[string]T) []string {
 	return keys
 }
 
-func stateWriteService(b *strings.Builder, domain, name string, svc homeassistant.ServiceDescription) {
+func stateWriteService(b *strings.Builder, domain, name string, svc homeassistant.ServiceDescription, texts stateServiceTexts) {
 	fmt.Fprintf(b, "%s.%s", domain, name)
+	if t := texts.get(domain, name, "name"); t != "" {
+		svc.Name = t
+	}
+	if t := texts.get(domain, name, "description"); t != "" {
+		svc.Description = t
+	}
 	if svc.Name != "" && !strings.EqualFold(svc.Name, name) {
 		fmt.Fprintf(b, " (%s)", svc.Name)
 	}
@@ -827,10 +882,10 @@ func stateWriteService(b *strings.Builder, domain, name string, svc homeassistan
 	if svc.Description != "" {
 		fmt.Fprintf(b, "  %s\n", truncate(svc.Description, 300))
 	}
-	stateWriteFields(b, svc.Fields, "  ")
+	stateWriteFields(b, svc.Fields, "  ", func(field string) string { return texts.get(domain, name, "fields", field, "description") })
 }
 
-func stateWriteFields(b *strings.Builder, fields map[string]json.RawMessage, indent string) {
+func stateWriteFields(b *strings.Builder, fields map[string]json.RawMessage, indent string, describe func(field string) string) {
 	for _, name := range stateSortedKeys(fields) {
 		var f stateServiceField
 		if json.Unmarshal(fields[name], &f) != nil {
@@ -839,8 +894,11 @@ func stateWriteFields(b *strings.Builder, fields map[string]json.RawMessage, ind
 		// Sections ("advanced options") group more fields; they are called
 		// with those fields directly, so flatten them.
 		if f.Fields != nil && f.Selector == nil {
-			stateWriteFields(b, f.Fields, indent)
+			stateWriteFields(b, f.Fields, indent, describe)
 			continue
+		}
+		if t := describe(name); t != "" {
+			f.Description = t
 		}
 		var parts []string
 		if f.Required {
