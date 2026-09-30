@@ -34,14 +34,10 @@ func main() {
 	for _, w := range cfg.Warnings {
 		log.Printf("warning: %s", w)
 	}
-	// Without an explicit signing key the password is the secret. That ties the
-	// credentials to it deliberately: changing the password is then also how an
-	// operator revokes every token that was issued under the old one.
-	secret := cfg.SigningKey
-	if secret == "" {
-		secret = cfg.Password
-	}
-	signer := oauth.NewSigner(secret)
+	// Every credential is signed with MCP_SIGNING_KEY alone, so changing it is
+	// how an operator revokes every token at once. Changing the password only
+	// affects future sign-ins.
+	signer := oauth.NewSigner(cfg.SigningKey)
 
 	ha, err := homeassistant.New(cfg.HAURL, cfg.HAToken, nil)
 	if err != nil {
@@ -52,11 +48,7 @@ func main() {
 	mcpSrv := mcpserver.New(ha, signer, cfg.Origin, version, cfg.ReadOnly)
 	srv := server.New(cfg, signer, mcpSrv.Handler())
 
-	httpSrv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	httpSrv := srv.HTTPServer(cfg.Addr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
