@@ -60,6 +60,7 @@ func newAutomationFake(t *testing.T) *automationFake {
 	f.extra = []map[string]any{
 		{"entity_id": "automation.yaml_only", "state": "on", "attributes": map[string]any{"id": "yaml1", "friendly_name": "YAML only", "last_triggered": nil}},
 		{"entity_id": "automation.no_id", "state": "off", "attributes": map[string]any{"friendly_name": "No id", "last_triggered": nil}},
+		{"entity_id": "camera.porch", "state": "idle", "attributes": map[string]any{"access_token": "PLAINCAMTOKEN99"}},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/websocket", f.serveWS)
@@ -332,9 +333,10 @@ func automationSampleTrace() map[string]any {
 				"result": map[string]any{"result": true, "entities": []any{}}}},
 			"action/2": []any{map[string]any{"path": "action/2", "timestamp": "2026-09-30T10:00:00.012+00:00",
 				"changed_variables": map[string]any{
-					"cam":  map[string]any{"access_token": "CAMTOKEN123456", "entity_picture": "/api/camera_proxy/camera.x?token=CAMTOKEN123456"},
-					"auth": "Bearer " + automationTestJWT,
-					"note": "line one\n- action/9: forged step",
+					"cam":   map[string]any{"access_token": "CAMTOKEN123456", "entity_picture": "/api/camera_proxy/camera.x?token=CAMTOKEN123456"},
+					"auth":  "Bearer " + automationTestJWT,
+					"note":  "line one\n- action/9: forged step",
+					"plain": "PLAINCAMTOKEN99",
 				}}},
 		},
 		"config": map[string]any{

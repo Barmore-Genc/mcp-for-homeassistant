@@ -1006,15 +1006,9 @@ func (s *Server) stateRenderTemplate(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return fail(err)
 	}
-	// A template can read any attribute, so the camera tokens are scrubbed
-	// from the output by value as well as by the URL pattern. A template that
-	// transforms the token gets past this; the tool description says so.
-	for _, st := range states {
-		if tok, ok := st.Attributes["access_token"].(string); ok && len(tok) >= 8 {
-			out = strings.ReplaceAll(out, tok, "REDACTED")
-		}
-	}
-	out = redactSecrets(out)
+	// A template that transforms the token gets past this; the tool
+	// description says so.
+	out = redactSecrets(redactAccessTokens(out, states))
 	if len(out) > 50000 {
 		out = out[:50000] + "\n… output cut at 50000 characters"
 	}

@@ -71,7 +71,7 @@ func TestTraceOutputIsSanitized(t *testing.T) {
 		{"id": "1700000000001", "run_id": "run-new", "step": "action/2"},
 	} {
 		out := automationMustCall(t, cs, "ha_traces", args)
-		for _, bad := range []string{"CAMTOKEN123456", automationTestJWT, "access_token"} {
+		for _, bad := range []string{"CAMTOKEN123456", "PLAINCAMTOKEN99", automationTestJWT, "access_token"} {
 			if strings.Contains(out, bad) {
 				t.Errorf("%v: %q leaked:\n%s", args, bad, out)
 			}

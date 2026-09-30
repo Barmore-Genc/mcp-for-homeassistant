@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/Barmore-Genc/mcp-for-homeassistant/internal/homeassistant"
 )
 
 // Camera and media player states carry an access token in access_token and in
@@ -54,6 +56,18 @@ func sanitizeValue(v any) any {
 	default:
 		return v
 	}
+}
+
+// redactAccessTokens replaces the current access token of every entity in s.
+// A template or a trace variable can hold a token on its own, where no pattern
+// recognizes it.
+func redactAccessTokens(s string, states []homeassistant.State) string {
+	for _, st := range states {
+		if tok, ok := st.Attributes["access_token"].(string); ok && len(tok) >= 8 {
+			s = strings.ReplaceAll(s, tok, "REDACTED")
+		}
+	}
+	return s
 }
 
 func sanitizeAttrs(attrs map[string]any) map[string]any {

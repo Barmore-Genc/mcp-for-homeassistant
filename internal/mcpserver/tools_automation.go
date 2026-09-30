@@ -422,7 +422,17 @@ func (s *Server) automationTraces(ctx context.Context, _ *mcp.CallToolRequest, i
 	if in.RunID == "" {
 		return s.automationTraceList(ctx, it.kind, it)
 	}
-	raw, err := s.ha.GetTrace(ctx, homeassistant.TraceDomain(it.kind), it.configID, strings.TrimSpace(in.RunID))
+	var (
+		raw    json.RawMessage
+		states []homeassistant.State
+	)
+	err = stateAll(
+		func() (err error) {
+			raw, err = s.ha.GetTrace(ctx, homeassistant.TraceDomain(it.kind), it.configID, strings.TrimSpace(in.RunID))
+			return
+		},
+		func() (err error) { states, err = s.ha.ListStates(ctx); return },
+	)
 	if homeassistant.IsNotFound(err) {
 		return fail(fmt.Errorf("no stored run %s for %s; HA keeps only the last few, list them without run_id", in.RunID, it.label()))
 	}
@@ -430,7 +440,7 @@ func (s *Server) automationTraces(ctx context.Context, _ *mcp.CallToolRequest, i
 		return fail(err)
 	}
 	var tr automationTrace
-	if err := json.Unmarshal([]byte(sanitizeJSON(raw)), &tr); err != nil {
+	if err := json.Unmarshal([]byte(redactAccessTokens(sanitizeJSON(raw), states)), &tr); err != nil {
 		return fail(fmt.Errorf("could not read the trace: %w", err))
 	}
 	if in.Step != "" {
