@@ -8,6 +8,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/oauth2 v0.37.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
