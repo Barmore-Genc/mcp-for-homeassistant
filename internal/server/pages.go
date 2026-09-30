@@ -80,7 +80,7 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
     <input id="password" name="password" type="password" autocomplete="current-password" required>
     {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
     <div class="row">
-      <button class="deny" type="submit" name="decision" value="deny">Cancel</button>
+      <button class="deny" type="submit" name="decision" value="deny" formnovalidate>Cancel</button>
       <button class="allow" type="submit" name="decision" value="allow">Sign in</button>
     </div>
     {{end}}

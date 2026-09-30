@@ -275,3 +275,13 @@ scenes, helpers, dashboards and backups, overwrite the default dashboard and the
 backup settings, and `TestIntegrationZRestart` restarts Home Assistant. Run them
 against the test instance only. Add `-skip TestIntegrationZRestart` to keep it
 running.
+
+`dev/e2e/run.sh` walks the sign-in pages in Chromium through Playwright's Docker
+image: password sign-in through to an `/mcp` call, a wrong password, Cancel, and
+the redirect to an OIDC provider. It checks that the browser applies the pages'
+Content-Security-Policy without blocking any of these steps. It uses the test
+instance from `dev/ha-test/env`.
+
+```sh
+dev/e2e/run.sh
+```

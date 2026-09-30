@@ -4,3 +4,4 @@
 /dev/ha-test/config/
 /dev/ha-test/env
 /.claude/worktrees/
+/dev/e2e/.bin/
