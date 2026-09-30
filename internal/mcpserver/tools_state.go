@@ -55,7 +55,8 @@ func (s *Server) addStateTools(srv *mcp.Server) {
 		Description: "Render a Home Assistant Jinja template and return the result, exactly as an automation would " +
 			"see it. Use it to test a template before putting it in an automation, or to answer questions that need " +
 			"computation across entities, e.g. \"{{ states.light | selectattr('state','eq','on') | list | count }}\" " +
-			"or \"{{ area_entities('kitchen') }}\".",
+			"or \"{{ area_entities('kitchen') }}\". A template can read a camera's access token, which gives view " +
+			"access to that camera for about 10 minutes; the output hides the token only where it appears unchanged.",
 	}, s.stateRenderTemplate)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -1006,7 +1007,8 @@ func (s *Server) stateRenderTemplate(ctx context.Context, _ *mcp.CallToolRequest
 		return fail(err)
 	}
 	// A template can read any attribute, so the camera tokens are scrubbed
-	// from the output by value as well as by the URL pattern.
+	// from the output by value as well as by the URL pattern. A template that
+	// transforms the token gets past this; the tool description says so.
 	for _, st := range states {
 		if tok, ok := st.Attributes["access_token"].(string); ok && len(tok) >= 8 {
 			out = strings.ReplaceAll(out, tok, "REDACTED")
