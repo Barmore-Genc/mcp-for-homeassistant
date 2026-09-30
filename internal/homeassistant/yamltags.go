@@ -20,8 +20,9 @@ var standardYAMLTags = map[string]bool{
 }
 
 // CheckYAMLTags returns an error for any tag outside the YAML core schema,
-// other than those in allowed. yaml.v3 expands %TAG handles and verbatim tags
-// before this sees them, so "!<!include>" and "%TAG !e! !" forms are caught too.
+// other than those in allowed. yaml.v3's parser is a port of libyaml, which
+// HA's loader also uses, so both read the same tags; it expands %TAG handles
+// and verbatim tags first, so "!<!include>" and "%TAG !e! !" are caught too.
 func CheckYAMLTags(n *yaml.Node, allowed ...string) error {
 	if n == nil {
 		return nil
